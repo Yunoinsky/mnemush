@@ -151,14 +151,29 @@ export function formatSearchHit(h: SearchHit): string {
   return `[${h.score.toFixed(2)}] ${formatMemory(h.memory)}`;
 }
 
-/** Heuristic: does this user message look like an explicit "remember this"? */
+/**
+ * Heuristic patterns for auto-capturing user messages. Substring match
+ * (no `\b` boundary) because `\b` in JS only matches ASCII word
+ * boundaries and silently fails for every CJK keyword.
+ *
+ * Lists are intentionally short and high-signal. v0.2's periodic LLM
+ * review (see ROADMAP) will pick up everything these miss.
+ */
+
+const REMEMBER_RE =
+  /(记住|记一下|记得|备忘|重要|remember|don['’]t forget|important|note that|key point)/iu;
+
+const CORRECTION_RE =
+  /(不要|别用|错了|不对|更正|应该是|改用|actually|never use|use \w+ not \w+)/iu;
+
+/** Does this user message look like an explicit "remember this"? */
 export function looksLikeRemember(text: string): boolean {
-  return /\b(记住|remember[,:]?|don't forget|备忘|记一下|important[!:：])\b/i.test(text);
+  return REMEMBER_RE.test(text);
 }
 
-/** Heuristic: does this user message look like a correction / override? */
+/** Does this user message look like a correction / override? */
 export function looksLikeCorrection(text: string): boolean {
-  return /\b(no[,:]? |actually[,]? |不对|不要|别用|错了|更正|use .+ not .+|应该是)\b/i.test(text);
+  return CORRECTION_RE.test(text);
 }
 
 // ── JSON-RPC plumbing ──────────────────────────────────────────
@@ -197,8 +212,11 @@ export class MnemeClient {
   >();
   private buffer = "";
   private closed = false;
+  private readonly options: MnemeClientOptions;
 
-  constructor(private readonly options: MnemeClientOptions = {}) {}
+  constructor(options: MnemeClientOptions = {}) {
+    this.options = options;
+  }
 
   /**
    * Spawn the mneme-mcp binary and return a connected client.

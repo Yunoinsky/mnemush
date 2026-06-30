@@ -17,7 +17,8 @@
     "build:ts": "npm run build --workspaces --if-present",
     "build": "npm run build:rust && npm run build:ts",
     "test:rust": "cargo test --manifest-path crates/mneme/Cargo.toml",
-    "test": "npm run test:rust"
+    "test:ts": "npm run test --workspaces --if-present",
+    "test": "npm run test:rust && npm run test:ts"
   },
   "license": "MulanPSL-2.0"
 }

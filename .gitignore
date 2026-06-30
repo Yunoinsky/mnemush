@@ -27,3 +27,6 @@ Thumbs.db
 
 # Tooling caches
 .codegraph/
+
+# npm pack tarballs
+*.tgz

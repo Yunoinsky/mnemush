@@ -27,7 +27,7 @@ interface ToolDefinition {
   name: string;
   description: string;
   parameters: Record<string, unknown>;
-  execute: (args: Record<string, unknown>, ctx: unknown) => Promise<unknown>;
+  execute: (toolCallId: string, args: Record<string, unknown>) => Promise<unknown>;
 }
 
 interface ToolResult<T> {
@@ -38,7 +38,7 @@ interface ToolResult<T> {
 
 interface ExtensionAPI {
   registerTool: <T>(tool: ToolDefinition & {
-    execute: (args: Record<string, unknown>, ctx: unknown) => Promise<ToolResult<T>>;
+    execute: (toolCallId: string, args: Record<string, unknown>) => Promise<ToolResult<T>>;
   }) => void;
   on: (event: string, handler: (event: unknown, ctx: unknown) => void | Promise<void>) => void;
   sendMessage?: (msg: string) => void;
@@ -92,11 +92,16 @@ export default function activate(pi: ExtensionAPI): void {
     }
   });
 
-  // ── user_prompt_submit: heuristic capture ───────────────────
-  pi.on("user_prompt_submit", async (event) => {
+  // ── before_agent_start: heuristic capture ──────────────────────
+  // Pi's actual event for "user just submitted a prompt" is
+  // `before_agent_start` (fires after submit, before agent loop).
+  // The earlier `user_prompt_submit` listener was never triggered
+  // because that event name does not exist in pi's runtime.
+  // `event.prompt` is the user's prompt text directly.
+  pi.on("before_agent_start", async (event) => {
     if (!client) return;
-    const e = event as { text?: string } | undefined;
-    const text = e?.text ?? "";
+    const e = event as { prompt?: string } | undefined;
+    const text = e?.prompt ?? "";
     if (!text) return;
     try {
       if (looksLikeRemember(text)) {
@@ -159,24 +164,24 @@ export default function activate(pi: ExtensionAPI): void {
       properties: {
         action: {
           type: "string",
-          enum: ["add", "search", "replace", "remove"],
+          enum: ["add", "search"],
           description: "What to do with the memory.",
         },
-        content: { type: "string", description: "Memory content (for add/replace)." },
+        content: { type: "string", description: "Memory content (for add)." },
         title: { type: "string", description: "Short title (for add)." },
-        id: { type: "string", description: "Memory id (for replace/remove/search by id)." },
+        importance: { type: "number", description: "0.0-1.0 (for add). Defaults to 0.5." },
+        query: { type: "string", description: "Search query (for search)." },
         category: {
           type: "string",
           enum: ["decision", "lesson", "failure", "correction", "insight", "preference", "convention", "tool_quirk", "episodic", "skill", "identity", "note"],
-          description: "Category (for add).",
+          description: "Category (for add) or category filter (for search).",
         },
-        importance: { type: "number", description: "0.0-1.0 (for add). Defaults to 0.5." },
-        query: { type: "string", description: "Search query (for search)." },
+        project: { type: "string", description: "Project filter (for search)." },
         limit: { type: "number", description: "Max results (for search). Default 10." },
       },
       required: ["action"],
     },
-    execute: async (args) => {
+    execute: async (_id, args) => {
       const c = getClient();
       const action = args.action as string;
       try {
@@ -203,28 +208,12 @@ export default function activate(pi: ExtensionAPI): void {
           case "search": {
             if (!args.query) return err("search requires query");
             const hits = await c.memorySearch(args.query as string, {
+              category: args.category as never,
+              project: args.project as string | undefined,
               limit: (args.limit as number) ?? 10,
             });
             if (hits.length === 0) return result("(no matches)");
             return result(hits.map(formatSearchHit).join("\n\n"), hits);
-          }
-          case "replace": {
-            // For simplicity: get existing, update content, re-save is not
-            // supported in the v0.1 MCP surface. Recommend delete + add.
-            return err(
-              "replace is not yet supported. Use action=remove then action=add to rewrite a memory.",
-            );
-          }
-          case "remove": {
-            if (!args.id) return err("remove requires id");
-            // Soft-delete not yet exposed via MCP; we recommend add a
-            // 'supersedes' edge or just leave the memory and add a
-            // correction with the new content.
-            return err(
-              "remove is not yet exposed via the v0.1 MCP surface. " +
-                "Use memory_search to find the old memory and add a new " +
-                "one with category=correction, then link with edge_type=supersedes.",
-            );
           }
           default:
             return err(`unknown action: ${action}`);
@@ -236,31 +225,24 @@ export default function activate(pi: ExtensionAPI): void {
   });
 
   pi.registerTool({
-    name: "memory_search",
+    name: "memory_get",
     description:
-      "Advanced search of long-term memory. Returns ranked hits with " +
-      "memory body and metadata. Use this when you need context that " +
-      "isn't in the current session.",
+      "Fetch a single memory by its full UUID. " +
+      "Search hits only expose an 8-char prefix; use this tool to " +
+      "retrieve the full id and metadata (e.g. before linking).",
     parameters: {
       type: "object",
       properties: {
-        query: { type: "string" },
-        category: { type: "string" },
-        project: { type: "string" },
-        limit: { type: "number" },
+        id: { type: "string", description: "Full UUID of the memory." },
       },
-      required: ["query"],
+      required: ["id"],
     },
-    execute: async (args) => {
+    execute: async (_id, args) => {
       const c = getClient();
       try {
-        const hits = await c.memorySearch(args.query as string, {
-          category: args.category as never,
-          project: args.project as string | undefined,
-          limit: (args.limit as number) ?? 10,
-        });
-        if (hits.length === 0) return result("(no matches)");
-        return result(hits.map(formatSearchHit).join("\n\n"), hits);
+        const m = await c.memoryGet(args.id as string);
+        if (!m) return err(`memory not found: ${args.id}`);
+        return result(formatMemory(m), m);
       } catch (e) {
         return err(e instanceof Error ? e.message : String(e));
       }
@@ -286,7 +268,7 @@ export default function activate(pi: ExtensionAPI): void {
       },
       required: ["source_id", "target_id"],
     },
-    execute: async (args) => {
+    execute: async (_id, args) => {
       const c = getClient();
       try {
         const edge = await c.memoryLink(

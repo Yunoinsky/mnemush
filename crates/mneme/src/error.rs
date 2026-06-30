@@ -25,11 +25,22 @@ pub enum MnemeError {
     #[error("scan blocked: {0}")]
     ScanBlocked(String),
 
-    #[error("constitutional violation: {0}")]
-    Constitutional(String),
-
     #[error("other: {0}")]
     Other(String),
 }
 
 pub type Result<T> = std::result::Result<T, MnemeError>;
+
+/// Convert a [`MnemeError`] (e.g. from strict `parse_*` calls) into a
+/// `rusqlite::Error` so it propagates through `query_row`/`query_map`
+/// closures that must return `rusqlite::Result<_>`. The original
+/// error is preserved as the inner `Box<dyn Error>`.
+impl From<MnemeError> for rusqlite::Error {
+    fn from(e: MnemeError) -> Self {
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            Box::new(e),
+        )
+    }
+}

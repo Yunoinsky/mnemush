@@ -17,7 +17,7 @@ use chrono::{DateTime, TimeZone, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 use crate::error::{MnemeError, Result};
-use crate::schema::{Category, Edge, EdgeType, Memory, MemoryType, Source, Tier};
+use crate::schema::{Category, Memory, MemoryType, Source, Tier};
 
 const SCHEMA_VERSION: i32 = 2;
 
@@ -144,25 +144,32 @@ impl Store {
     }
 
     fn migrate(&mut self) -> Result<()> {
+        // v0.1 ships the current schema on a fresh DB. Older schema
+        // versions don't exist yet (v1+ will be added when a real
+        // migration is needed). If a future binary sees a newer
+        // schema_version, refuse to open to avoid silent corruption.
         let tx = self.conn.transaction()?;
         tx.execute_batch(SCHEMA_SQL)?;
         let current: Option<i32> = tx
             .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
             .optional()?;
-        let current = current.unwrap_or(0);
-        if current < SCHEMA_VERSION {
-            // Migration from v1 (with FTS5 triggers) to v2 (manual FTS).
-            // Just bump version; existing FTS triggers on v1 dbs will be
-            // ignored because we use manual sync.
-            tx.execute(
-                "INSERT OR REPLACE INTO schema_version (version) VALUES (?1)",
-                params![SCHEMA_VERSION],
-            )?;
-        } else if current > SCHEMA_VERSION {
-            return Err(MnemeError::Other(format!(
-                "schema version {} is newer than supported {}",
-                current, SCHEMA_VERSION
-            )));
+        match current {
+            None => {
+                tx.execute(
+                    "INSERT INTO schema_version (version) VALUES (?1)",
+                    params![SCHEMA_VERSION],
+                )?;
+            }
+            Some(v) if v > SCHEMA_VERSION => {
+                return Err(MnemeError::Other(format!(
+                    "schema version {} is newer than supported {}",
+                    v, SCHEMA_VERSION
+                )));
+            }
+            Some(_) => {
+                // v0.1 schema: nothing to migrate. Future versions
+                // will add `if v < X { /* upgrade */ }` arms here.
+            }
         }
         tx.commit()?;
         Ok(())
@@ -228,12 +235,14 @@ impl Store {
                 m.needs_review as i32,
             ],
         )?;
-        // FTS5 needs INTEGER rowid. Use the memory table's internal
-        // rowid (since `id` is TEXT, not aliased to rowid).
-        let rowid: i64 = tx.query_row("SELECT last_insert_rowid()", [], |r| r.get(0))?;
+        // FTS5 gets its own auto-assigned rowid (omit `rowid` column).
+        // Earlier code reused `memory.rowid` from `last_insert_rowid()`,
+        // which silently collided with orphan FTS5 rows left behind by
+        // partial cleanup of the memory table, surfacing as
+        // "constraint failed" at insert time.
         tx.execute(
-            "INSERT INTO memory_fts(rowid, title, content, context, tags) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![rowid, m.title, m.content, m.context, tags_str],
+            "INSERT INTO memory_fts(title, content, context, tags) VALUES (?1, ?2, ?3, ?4)",
+            params![m.title, m.content, m.context, tags_str],
         )?;
         Ok(())
     }
@@ -259,16 +268,16 @@ impl Store {
 
         Ok(Memory {
             id: row.get("id")?,
-            memory_type: parse_memory_type(&memory_type_str),
-            tier: parse_tier(&tier_str),
-            category: parse_category(&category_str),
+            memory_type: parse_memory_type(&memory_type_str)?,
+            tier: parse_tier(&tier_str)?,
+            category: parse_category(&category_str)?,
             title: row.get("title")?,
             content: row.get("content")?,
             context: row.get("context")?,
             topic_key: row.get("topic_key")?,
             tags,
             project: row.get("project")?,
-            source: parse_source(&source_str),
+            source: parse_source(&source_str)?,
             initial_confidence: row.get("initial_confidence")?,
             confidence: row.get("confidence")?,
             importance: row.get("importance")?,
@@ -285,7 +294,11 @@ impl Store {
     }
 
     pub fn update_memory_tx(tx: &Transaction, m: &Memory) -> Result<()> {
-        let tags_str = m.tags.join(" ");
+        // Only updates the memory row. FTS5 sync intentionally omitted:
+        // the only caller in v0.1 (`MemoryApi::search` access-boost) only
+        // mutates `confidence`, `last_accessed_at`, `access_count` —
+        // nothing FTS5 indexes. If a future caller mutates title/content,
+        // FTS5 sync needs to come back (see insert_memory_tx for pattern).
         tx.execute(
             r#"UPDATE memory SET
                 memory_type=?2, tier=?3, category=?4, title=?5, content=?6, context=?7,
@@ -304,7 +317,7 @@ impl Store {
                 m.content,
                 m.context,
                 m.topic_key,
-                tags_str,
+                m.tags.join(" "),
                 m.project,
                 m.source.as_str(),
                 m.initial_confidence,
@@ -321,79 +334,7 @@ impl Store {
                 m.needs_review as i32,
             ],
         )?;
-        // Sync FTS: delete old rowid, insert new. Look up the integer
-        // rowid from the memory table (since we joined on TEXT id).
-        let rowid: i64 = tx.query_row(
-            "SELECT rowid FROM memory WHERE id = ?1",
-            params![m.id],
-            |r| r.get(0),
-        )?;
-        tx.execute("DELETE FROM memory_fts WHERE rowid = ?1", params![rowid])?;
-        tx.execute(
-            "INSERT INTO memory_fts(rowid, title, content, context, tags) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![rowid, m.title, m.content, m.context, tags_str],
-        )?;
         Ok(())
-    }
-
-    // ── Edge row operations ─────────────────────────────────────────
-
-    pub fn insert_edge_tx(tx: &Transaction, e: &Edge) -> Result<()> {
-        tx.execute(
-            r#"INSERT INTO memory_edge (
-                id, source_id, target_id, edge_type,
-                strength, initial_strength, bidirectional,
-                provenance, evidence, context,
-                access_count, last_activated, stability,
-                created_at, deleted_at
-            ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15
-            )"#,
-            params![
-                e.id,
-                e.source_id,
-                e.target_id,
-                e.edge_type.as_str(),
-                e.strength,
-                e.initial_strength,
-                e.bidirectional as i32,
-                e.provenance,
-                e.evidence,
-                e.context,
-                e.access_count,
-                e.last_activated.map(|d| d.timestamp()),
-                e.stability,
-                e.created_at.timestamp(),
-                e.deleted_at.map(|d| d.timestamp()),
-            ],
-        )?;
-        Ok(())
-    }
-
-    pub fn row_to_edge(row: &rusqlite::Row) -> rusqlite::Result<Edge> {
-        let edge_type_str: String = row.get("edge_type")?;
-        let last_act_ts: Option<i64> = row.get("last_activated")?;
-        let created_ts: i64 = row.get("created_at")?;
-        let deleted_ts: Option<i64> = row.get("deleted_at")?;
-        let bidir: i32 = row.get("bidirectional")?;
-
-        Ok(Edge {
-            id: row.get("id")?,
-            source_id: row.get("source_id")?,
-            target_id: row.get("target_id")?,
-            edge_type: parse_edge_type(&edge_type_str),
-            strength: row.get("strength")?,
-            initial_strength: row.get("initial_strength")?,
-            bidirectional: bidir != 0,
-            provenance: row.get("provenance")?,
-            evidence: row.get("evidence")?,
-            context: row.get("context")?,
-            access_count: row.get("access_count")?,
-            last_activated: last_act_ts.map(Self::ts_to_dt),
-            stability: row.get("stability")?,
-            created_at: Self::ts_to_dt(created_ts),
-            deleted_at: deleted_ts.map(Self::ts_to_dt),
-        })
     }
 
     // ── Audit log ───────────────────────────────────────────────────
@@ -423,59 +364,66 @@ impl Store {
     }
 }
 
-fn parse_memory_type(s: &str) -> MemoryType {
-    match s {
-        "identity" => MemoryType::Identity,
-        "procedural" => MemoryType::Procedural,
-        _ => MemoryType::Semantic,
-    }
+/// String → enum parser. Unknown values are an error, not a silent
+/// fallback. Use this for round-tripping DB rows; writes already go
+/// through the strict `Enum::parse()` (returns `Option`) so the
+/// only way an unknown value lands in the DB is direct SQL or a
+/// future-schema mismatch — both should fail loudly at read time.
+macro_rules! parse_enum {
+    ($s:expr, $enum:ty, { $($variant:ident => $str:expr),+ $(,)? }) => {
+        match $s {
+            $($str => Ok(<$enum>::$variant),)+
+            _ => Err($crate::error::MnemeError::Invalid(
+                format!("unknown {}: '{}'", stringify!($enum), $s),
+            )),
+        }
+    };
 }
 
-fn parse_tier(s: &str) -> Tier {
-    match s {
-        "project" => Tier::Project,
-        "skill" => Tier::Skill,
-        "session" => Tier::Session,
-        _ => Tier::Global,
-    }
+fn parse_memory_type(s: &str) -> Result<MemoryType> {
+    parse_enum!(s, MemoryType, {
+        Identity => "identity",
+        Procedural => "procedural",
+        Semantic => "semantic",
+    })
 }
 
-fn parse_category(s: &str) -> Category {
-    match s {
-        "decision" => Category::Decision,
-        "lesson" => Category::Lesson,
-        "failure" => Category::Failure,
-        "correction" => Category::Correction,
-        "insight" => Category::Insight,
-        "preference" => Category::Preference,
-        "convention" => Category::Convention,
-        "tool_quirk" => Category::ToolQuirk,
-        "episodic" => Category::Episodic,
-        "skill" => Category::Skill,
-        "identity" => Category::Identity,
-        _ => Category::Note,
-    }
+fn parse_tier(s: &str) -> Result<Tier> {
+    parse_enum!(s, Tier, {
+        Global => "global",
+        Project => "project",
+        Skill => "skill",
+        Session => "session",
+    })
 }
 
-fn parse_source(s: &str) -> Source {
-    match s {
-        "auto_heuristic" => Source::AutoHeuristic,
-        "auto_review" => Source::AutoReview,
-        "correction" => Source::Correction,
-        "skill" => Source::Skill,
-        "session_import" => Source::SessionImport,
-        "search_result" => Source::SearchResult,
-        _ => Source::Manual,
-    }
+fn parse_category(s: &str) -> Result<Category> {
+    parse_enum!(s, Category, {
+        Decision => "decision",
+        Lesson => "lesson",
+        Failure => "failure",
+        Correction => "correction",
+        Insight => "insight",
+        Preference => "preference",
+        Convention => "convention",
+        ToolQuirk => "tool_quirk",
+        Episodic => "episodic",
+        Skill => "skill",
+        Identity => "identity",
+        Note => "note",
+    })
 }
 
-fn parse_edge_type(s: &str) -> EdgeType {
-    match s {
-        "supports" => EdgeType::Supports,
-        "contradicts" => EdgeType::Contradicts,
-        "supersedes" => EdgeType::Supersedes,
-        _ => EdgeType::Related,
-    }
+fn parse_source(s: &str) -> Result<Source> {
+    parse_enum!(s, Source, {
+        Manual => "manual",
+        AutoHeuristic => "auto_heuristic",
+        AutoReview => "auto_review",
+        Correction => "correction",
+        Skill => "skill",
+        SessionImport => "session_import",
+        SearchResult => "search_result",
+    })
 }
 
 #[cfg(test)]
@@ -519,6 +467,42 @@ mod tests {
         assert_eq!(got.id, m.id);
         assert_eq!(got.title, m.title);
         assert_eq!(got.tags, m.tags);
+    }
+
+    #[test]
+    fn unknown_category_errors_instead_of_silent_fallback() {
+        // Insert a row with a hand-written bogus category that
+        // bypasses the strict Category::parse path. Loading it
+        // should now error loudly, not silently coerce to Note.
+        let store = Store::open_in_memory().unwrap();
+        let bogus_id = uuid::Uuid::new_v4().to_string();
+        store.conn.execute(
+            "INSERT INTO memory (id, memory_type, tier, category, title, content, tags, source, \
+             initial_confidence, confidence, importance, access_count, last_accessed_at, created_at, \
+             never_prune, never_decay, content_hash, needs_review) \
+             VALUES (?1, 'semantic', 'global', 'decizion', 't', 'c', '', 'manual', \
+             1.0, 1.0, 0.5, 0, 0, 0, 0, 0, 'h', 0)",
+            params![bogus_id],
+        ).unwrap();
+
+        let r = store.conn.query_row(
+            "SELECT * FROM memory WHERE id=?1",
+            params![bogus_id],
+            Store::row_to_memory,
+        );
+        let err = r.unwrap_err();
+        // The original MnemeError is preserved inside the rusqlite
+        // FromSqlConversionFailure; walk the source chain to assert.
+        let mut src: &dyn std::error::Error = &err;
+        let mut found = false;
+        while let Some(s) = src.source() {
+            if s.to_string().contains("unknown Category: 'decizion'") {
+                found = true;
+                break;
+            }
+            src = s;
+        }
+        assert!(found, "expected parse error mentioning 'decizion', got: {err}");
     }
 
     #[test]

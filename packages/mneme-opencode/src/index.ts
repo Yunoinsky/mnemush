@@ -13,8 +13,7 @@
 
 import {
   MnemeClient,
-  formatMemory,
-  formatSearchHit as formatHit,
+  formatSearchHit,
   looksLikeCorrection,
   looksLikeRemember,
 } from "mneme-client";
@@ -156,7 +155,7 @@ const plugin: OpenCodePlugin = ({ client: oc }) => {
             limit: (args.limit as number) ?? 10,
           });
           if (hits.length === 0) return result("(no matches)");
-          return result(hits.map(formatHit).join("\n\n"));
+          return result(hits.map(formatSearchHit).join("\n\n"));
         }
         return err(`unknown action: ${action}`);
       } catch (e) {
@@ -186,7 +185,7 @@ const plugin: OpenCodePlugin = ({ client: oc }) => {
           limit: (args.limit as number) ?? 10,
         });
         if (hits.length === 0) return result("(no matches)");
-        return result(hits.map(formatHit).join("\n\n"));
+        return result(hits.map(formatSearchHit).join("\n\n"));
       } catch (e) {
         return err(e instanceof Error ? e.message : String(e));
       }

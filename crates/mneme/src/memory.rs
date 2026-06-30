@@ -47,26 +47,6 @@ impl<'a> MemoryApi<'a> {
         hex::encode(hasher.finalize())
     }
 
-    /// Quick secret/PII scan — returns the first offending pattern, or None.
-    pub fn scan(content: &str) -> Option<&'static str> {
-        // A small but high-signal list. Extend in `scanner.rs` later.
-        const PATTERNS: &[(&str, &str)] = &[
-            (r"AKIA[0-9A-Z]{16}", "AWS access key"),
-            (r"sk-[A-Za-z0-9]{20,}", "OpenAI-style key"),
-            (r"ghp_[A-Za-z0-9]{30,}", "GitHub PAT"),
-            (r"xox[abp]-[A-Za-z0-9-]{10,}", "Slack token"),
-            (r"AIza[0-9A-Za-z\-_]{35}", "Google API key"),
-        ];
-        for (pat, desc) in PATTERNS {
-            if let Ok(re) = regex::Regex::new(pat) {
-                if re.is_match(content) {
-                    return Some(desc);
-                }
-            }
-        }
-        None
-    }
-
     /// Topic key normalization: lowercase, hyphenated, capped at 64 chars.
     pub fn topic_key(title: &str, content: &str) -> String {
         let raw = format!("{} {}", title, content);
@@ -95,7 +75,7 @@ impl<'a> MemoryApi<'a> {
 
     /// Add a new memory. Returns the new id and any FTS5 conflict candidates.
     pub fn add(&self, m: NewMemory) -> Result<AddResult> {
-        if let Some(threat) = Self::scan(&m.content) {
+        if let Some(threat) = crate::scanner::scan(&m.content) {
             return Err(MnemeError::ScanBlocked(threat.to_string()));
         }
         let hash = Self::content_hash(&m.content);
@@ -438,6 +418,7 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema::{Tier, Source, MemoryType};
     use crate::schema::NewMemory;
 
     fn setup() -> (Store, Config) {
@@ -495,3 +476,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod debug_tests {}

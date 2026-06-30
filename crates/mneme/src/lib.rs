@@ -18,6 +18,7 @@ pub mod error;
 pub mod forget;
 pub mod identity;
 pub mod memory;
+pub mod scanner;
 pub mod schema;
 pub mod store;
 

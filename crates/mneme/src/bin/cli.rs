@@ -275,11 +275,11 @@ fn count_by(store: &Store, col: &str) -> anyhow::Result<Vec<(String, i64)>> {
 
 fn truncate(s: &str, n: usize) -> String {
     let s = s.replace('\n', " ");
-    if s.len() <= n {
-        s
-    } else {
-        format!("{}…", &s[..n])
+    let mut out: String = s.chars().take(n).collect();
+    if s.chars().count() > n {
+        out.push('…');
     }
+    out
 }
 
 fn init_dotfiles() -> anyhow::Result<()> {

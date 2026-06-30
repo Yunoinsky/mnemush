@@ -29,12 +29,8 @@ auto_link_topic_strength = 0.6
 # text similarity in this range → trigger supersede detection
 auto_link_supersede_min_sim = 0.5
 auto_link_supersede_max_sim = 0.95
-# max edges per memory (truncate lowest strength)
-max_edges_per_memory = 50
 # edge decay half-life (independent of nodes)
 edge_decay_half_life_days = 60.0
-# edge strength floor (below → soft delete)
-edge_strength_floor = 0.05
 # default max hops for neighbor queries
 max_neighbor_hops = 2
 # master switch for auto-linking on add
@@ -42,29 +38,10 @@ auto_link_enabled = true
 
 [search]
 default_limit = 10
-# score = bm25 * recency^w_r * importance^w_i * identity_match^w_id
+# score = bm25 * relevance^w_r * recency^w_re * importance^w_i
 weight_relevance = 1.0
 weight_recency = 0.3
 weight_importance = 0.2
-weight_identity_match = 0.2
-
-[identity]
-# char limits for user / persona files
-user_char_limit = 5000
-persona_char_limit = 5000
-# require user confirmation before auto-updating identity files
-require_confirmation_on_update = true
-# LTM evidence count threshold for auto-update suggestions
-auto_update_min_evidence_count = 3
-
-[review]
-# session-end review batch size
-session_end_batch_size = 20
-# needs_review items older than this get downgraded
-needs_review_max_age_days = 7
-# (v0.2) enable identity reflection
-identity_reflection_enabled = false
 
 [storage]
 db_path = "~/.mneme/mneme.db"
-wal_mode = true

@@ -13,12 +13,11 @@ use std::path::Path;
 use crate::error::{MnemeError, Result};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct Config {
     pub forgetting: ForgettingConfig,
     pub edges: EdgeConfig,
     pub search: SearchConfig,
-    pub identity: IdentityConfig,
     pub storage: StorageConfig,
 }
 
@@ -60,9 +59,7 @@ pub struct EdgeConfig {
     pub auto_link_topic_strength: f32,
     pub auto_link_supersede_min_sim: f32,
     pub auto_link_supersede_max_sim: f32,
-    pub max_edges_per_memory: usize,
     pub edge_decay_half_life_days: f32,
-    pub edge_strength_floor: f32,
     pub max_neighbor_hops: usize,
     pub auto_link_enabled: bool,
 }
@@ -73,9 +70,7 @@ impl Default for EdgeConfig {
             auto_link_topic_strength: 0.6,
             auto_link_supersede_min_sim: 0.5,
             auto_link_supersede_max_sim: 0.95,
-            max_edges_per_memory: 50,
             edge_decay_half_life_days: 60.0,
-            edge_strength_floor: 0.05,
             max_neighbor_hops: 2,
             auto_link_enabled: true,
         }
@@ -89,7 +84,6 @@ pub struct SearchConfig {
     pub weight_relevance: f32,
     pub weight_recency: f32,
     pub weight_importance: f32,
-    pub weight_identity_match: f32,
 }
 
 impl Default for SearchConfig {
@@ -99,27 +93,6 @@ impl Default for SearchConfig {
             weight_relevance: 1.0,
             weight_recency: 0.3,
             weight_importance: 0.2,
-            weight_identity_match: 0.2,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct IdentityConfig {
-    pub user_char_limit: usize,
-    pub persona_char_limit: usize,
-    pub require_confirmation_on_update: bool,
-    pub auto_update_min_evidence_count: u32,
-}
-
-impl Default for IdentityConfig {
-    fn default() -> Self {
-        Self {
-            user_char_limit: 5000,
-            persona_char_limit: 5000,
-            require_confirmation_on_update: true,
-            auto_update_min_evidence_count: 3,
         }
     }
 }
@@ -128,14 +101,12 @@ impl Default for IdentityConfig {
 #[serde(default)]
 pub struct StorageConfig {
     pub db_path: String,
-    pub wal_mode: bool,
 }
 
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             db_path: "~/.mneme/mneme.db".to_string(),
-            wal_mode: true,
         }
     }
 }
@@ -271,5 +242,25 @@ mod tests {
         let c = parse_toml(toml).unwrap();
         assert_eq!(c.forgetting.half_life_days, 30.0);
         assert_eq!(c.forgetting.prune_confidence_threshold, 0.2);
+    }
+
+    #[test]
+    fn tolerates_unknown_top_level_sections() {
+        // Forward-compat: configs from a newer mneme may contain sections
+        // (e.g. `[identity]`, `[review]`) that this binary does not yet
+        // implement. Loading must not panic; unknown sections are
+        // ignored and known fields keep their values.
+        let toml = r#"
+            [forgetting]
+            half_life_days = 30.0
+
+            [identity]
+            user_char_limit = 5000
+
+            [review]
+            session_end_batch_size = 20
+        "#;
+        let c = parse_toml(toml).unwrap();
+        assert_eq!(c.forgetting.half_life_days, 30.0);
     }
 }

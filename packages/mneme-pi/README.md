@@ -7,7 +7,7 @@ Pi extension for [mneme](https://github.com/Yunoinsky/mneme) — the brain-inspi
 - Spawns `mneme-mcp` automatically on session start
 - Auto-captures corrections and "remember X" patterns from user messages
 - Auto-captures tool failures as memories
-- Exposes 3 native Pi tools: `memory`, `memory_search`, `memory_link`
+- Exposes 3 native Pi tools: `memory`, `memory_get`, `memory_link`
 
 ## Install
 
@@ -21,18 +21,18 @@ Then ensure the `mneme-mcp` binary is on `PATH` (install via `cargo install mnem
 
 ### `memory`
 
-CRUD-style memory operations. Use this to save and retrieve facts.
+Save and search memories. Two actions:
 
 | Action | Required args | Effect |
 |---|---|---|
 | `add` | `title`, `content` (+ optional `category`, `importance`) | save a new memory |
-| `search` | `query` (+ optional `limit`) | search by FTS5 |
-| `remove` | `id` | (v0.1: returns an error recommending manual cleanup) |
-| `replace` | `id`, `content` | (v0.1: returns an error; do remove + add) |
+| `search` | `query` (+ optional `category`, `project`, `limit`) | FTS5 search |
 
-### `memory_search`
+To update or delete a memory, fetch it with `memory_get`, then add a new one with `category=correction` and link with `edge_type=supersedes`. The MCP layer does not expose direct edit/delete in v0.1.
 
-Same as `memory action=search` but with a stable signature and additional filters (`category`, `project`).
+### `memory_get`
+
+Fetch a single memory by its full UUID. Search hits only show an 8-char prefix; use this when you need the full id (e.g. before `memory_link`).
 
 ### `memory_link`
 

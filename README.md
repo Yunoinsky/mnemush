@@ -22,7 +22,7 @@ See [ROADMAP.md](ROADMAP.md) for what's done and what's next.
 
 ```bash
 # Clone & enter
-git clone <repo-url> mneme && cd mneme
+git clone https://github.com/Yunoinsky/mneme.git && cd mneme
 
 # Install (builds Rust + TS, copies to ~/.cargo/bin, inits ~/.mneme/)
 ./scripts/install.sh
@@ -41,11 +41,12 @@ mneme stats
 ### For Pi
 
 ```bash
-pi install npm:mneme-pi
+# Install the extension from your local clone (not on npm yet)
+pi install ./packages/mneme-pi
 # restart pi
 ```
 
-Pi auto-spawns `mneme-mcp` and connects via stdio. Identity is auto-injected into every session.
+Pi auto-spawns `mneme-mcp` and connects via stdio on every session. Identity is auto-injected.
 
 ### For OpenCode
 
@@ -82,7 +83,6 @@ Restart OpenCode; the plugin will lazy-connect to `mneme-mcp` on first use.
 
 1. **Identity** (`~/.mneme/identity/*.md`) — USER, PERSONA, CONSTITUTION. Never decays, always injected.
 2. **LTM graph** (SQLite) — Procedural, Semantic, Identity nodes. Edges: related / supports / contradicts / supersedes. Decays on Ebbinghaus curve.
-3. **Review queue** — items tagged for LLM-driven re-evaluation.
 
 Three core mechanisms (brain-inspired, all in v0.1):
 

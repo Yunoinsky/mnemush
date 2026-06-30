@@ -8,12 +8,13 @@
   "exports": {
     ".": {
       "import": "./dist/index.js",
+      "require": "./dist/index.js",
       "types": "./dist/index.d.ts"
     }
   },
   "scripts": {
     "build": "tsc",
-    "test": "echo 'no tests yet'"
+    "test": "node --test --experimental-strip-types test/regex.test.ts"
   },
   "engines": {
     "node": ">=20"

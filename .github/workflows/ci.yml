@@ -43,6 +43,12 @@ jobs:
             (cd "$pkg" && npx tsc --noEmit)
           done
 
+      - name: Unit tests
+        run: |
+          for pkg in packages/*/; do
+            (cd "$pkg" && npm test)
+          done
+
   mcp-smoke:
     name: MCP smoke test
     runs-on: ubuntu-latest

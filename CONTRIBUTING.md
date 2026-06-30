@@ -45,36 +45,49 @@ mneme/
 - Errors via `thiserror` for libraries, `anyhow` for binaries
 - No `unwrap()` outside tests
 
-### TypeScript
-
-- Strict mode (`"strict": true` in tsconfig)
-- `noUncheckedIndexedAccess: true`
-- No `any` (use `unknown` and narrow)
-- Public API: TypeBox schemas for tool parameters
-
 ## Commit message format
 
-```
-<type>(<scope>): <description>
+We follow [gitmoji](https://gitmoji.dev/specification): `<emoji> [scope?] <description>`. Scope is optional and lowercase. Subject line ≤72 chars, sentence case, no trailing period.
 
-[body]
-
-[footer]
+```text
+<emoji> [scope?] <description>
 ```
 
-Types: `feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `perf`
+Examples (drawn from real history):
 
-Examples:
-- `feat(rust): add edge decay with Ebbinghaus curve`
-- `fix(mcp): handle empty result set in memory_search`
-- `docs: clarify auto_inject_before_turn semantics`
+- `📝 docs(README): fix placeholder URL`
+- `♻️ refactor(config): delete 8 dead config fields`
+- `🔧 chore(gitignore): ignore .codegraph/ tooling cache`
+- `🐛 fix(mcp): handle empty result set in memory_search`
+
+Common emojis (full set at gitmoji.dev):
+
+| Emoji | Use for |
+|---|---|
+| ✨ | new feature |
+| 🐛 | bug fix |
+| 🩹 | trivial / non-critical fix |
+| 🚑 | critical hotfix |
+| 📝 | docs |
+| ♻️ | refactor |
+| 🎨 | code formatting / structure |
+| ⚡ | performance |
+| 🔥 / ⚰️ | remove code or files / dead code |
+| ✅ | tests |
+| 🔧 | config files |
+| 🔨 | dev scripts |
+| 📦 | package / build |
+| 🚀 | deploy / release |
+| 🚧 | WIP |
+| 🙈 | .gitignore |
+| 💚 | CI fix |
+| 🔒 | security |
 
 ## Testing
 
 - Unit tests colocated with code (`#[cfg(test)] mod tests`)
-- Integration tests in `crates/mneme/tests/`
-- TS tests with vitest
-- Run all tests: `cargo test && npm test`
+- TS builds verified via `tsc --noEmit`
+- Run all: `cargo test --manifest-path crates/mneme/Cargo.toml && npm run build`
 
 ## Release process
 

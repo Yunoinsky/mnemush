@@ -41,17 +41,16 @@ Mneme is structured around three principles borrowed from human memory:
 ### Rust core (`crates/mneme/src/`)
 
 ```
-lib.rs              — public API surface
-schema.rs           — Memory, Edge, MemoryType, Category, EdgeType
+lib.rs              — public API surface + shared helpers (expand_tilde, init_tracing)
+schema.rs           — Memory, Edge, MemoryType, Category, EdgeType, parse helpers
 config.rs           — Config + 5-layer override (default / global / project / env / per-memory)
-store.rs            — SQLite wrapper, migrations, FTS5 sync
-memory.rs           — high-level ops: add / search / get / update / delete / list
-edge.rs             — edge ops: link / unlink / neighbors / spreading
+store.rs            — SQLite wrapper, migrations, manual FTS5 sync
+memory.rs           — high-level ops: add / search / get / update / delete / list + scanner
+edge.rs             — edge ops: link / neighbors (recursive CTE BFS)
 forget.rs           — Ebbinghaus decay, active pruning, access boost
 identity.rs         — USER/PERSONA/CONSTITUTION file load + identity sync
-review.rs           — review queue management + LLM prompt construction
 error.rs            — MnemeError + Result alias
-bin/mcp.rs          — MCP stdio server
+bin/mcp.rs          — MCP stdio server (5 tools)
 bin/cli.rs          — terminal CLI (clap)
 ```
 
@@ -74,7 +73,7 @@ TS adapter: validate, compute content_hash
   ↓
 MCP: memory_add → Rust
   ↓
-1. scanner.rs (no secret patterns in content)
+1. secret scanner (inline in memory.rs, no credential patterns in content)
 2. dedup (content_hash collision? skip)
 3. conflict (FTS5 similar entries; return candidates)
 4. topic_key normalized
@@ -99,8 +98,7 @@ MCP: memory_search → Rust
    confidence    = current_confidence(memory)
    importance_boost = 1 + importance
    score = bm25 * retrievability * confidence * importance_boost
-3. identity_bias: multiply by user preference match factor
-4. (v0.3) neighbor expansion: BFS edges, top-K more
+3. (v0.3) neighbor expansion: BFS edges, top-K more
 5. update last_accessed + access_count for all returned hits
 6. return top-N sorted by score
 ```
@@ -144,37 +142,39 @@ session_end:
 ```sql
 CREATE TABLE memory (
     id TEXT PRIMARY KEY,
-    memory_type TEXT NOT NULL,  -- 'Identity' | 'Procedural' | 'Semantic'
-    tier TEXT NOT NULL,         -- 'Global' | 'Project' | 'Skill' | 'Session'
+    memory_type TEXT NOT NULL,  -- 'identity' | 'procedural' | 'semantic'
+    tier TEXT NOT NULL,         -- 'global' | 'project' | 'skill' | 'session'
     category TEXT NOT NULL,
     title TEXT NOT NULL,
     content TEXT NOT NULL,
     context TEXT,
     topic_key TEXT,
-    tags TEXT,                  -- JSON array
-    links TEXT,                 -- JSON
+    tags TEXT NOT NULL DEFAULT '',  -- space-delimited list
     project TEXT,
     source TEXT NOT NULL,
-    
-    initial_confidence REAL DEFAULT 1.0,
-    confidence REAL DEFAULT 1.0,
-    importance REAL DEFAULT 0.5,
-    
-    access_count INTEGER DEFAULT 0,
+
+    initial_confidence REAL NOT NULL DEFAULT 1.0,
+    confidence REAL NOT NULL DEFAULT 1.0,
+    importance REAL NOT NULL DEFAULT 0.5,
+
+    access_count INTEGER NOT NULL DEFAULT 0,
     last_accessed_at INTEGER NOT NULL,
     created_at INTEGER NOT NULL,
-    
+
     override_half_life REAL,
-    never_prune INTEGER DEFAULT 0,
-    never_decay INTEGER DEFAULT 0,
-    
+    never_prune INTEGER NOT NULL DEFAULT 0,
+    never_decay INTEGER NOT NULL DEFAULT 0,
+
     content_hash TEXT NOT NULL,
-    deleted_at INTEGER
+    deleted_at INTEGER,
+    needs_review INTEGER NOT NULL DEFAULT 0
 );
 
+-- Standalone FTS5 (not external-content). Synced manually from Rust
+-- because FTS5 triggers mis-parse parentheses in user content.
 CREATE VIRTUAL TABLE memory_fts USING fts5(
     title, content, context, tags,
-    content='memory', content_rowid='rowid'
+    tokenize = 'unicode61 remove_diacritics 1'
 );
 
 CREATE TABLE memory_edge (
@@ -182,15 +182,15 @@ CREATE TABLE memory_edge (
     source_id TEXT NOT NULL,
     target_id TEXT NOT NULL,
     edge_type TEXT NOT NULL,    -- 'related' | 'supports' | 'contradicts' | 'supersedes'
-    strength REAL DEFAULT 0.5,
-    bidirectional INTEGER DEFAULT 0,
+    strength REAL NOT NULL DEFAULT 0.5,
+    initial_strength REAL NOT NULL DEFAULT 0.5,
+    bidirectional INTEGER NOT NULL DEFAULT 0,
     provenance TEXT,
     evidence TEXT,
     context TEXT,
-    access_count INTEGER DEFAULT 0,
+    access_count INTEGER NOT NULL DEFAULT 0,
     last_activated INTEGER,
-    stability REAL DEFAULT 7.0,
-    initial_strength REAL DEFAULT 0.5,
+    stability REAL NOT NULL DEFAULT 7.0,
     created_at INTEGER NOT NULL,
     deleted_at INTEGER,
     UNIQUE(source_id, target_id, edge_type),
@@ -224,7 +224,7 @@ CREATE TABLE schema_version (
 ├── config.toml
 ├── mneme.db
 ├── mneme.db-wal            (WAL journal, transient)
-└── pending_identity.json   (suggestions from reflection, transient)
+└── pending_identity.json   (v0.2: suggestions from identity reflection, transient)
 ```
 
 ## Memory types
@@ -232,23 +232,23 @@ CREATE TABLE schema_version (
 | Type | Use | Decay | Example |
 |---|---|---|---|
 | **Identity** | user profile / agent persona | never | "user prefers Rust over Go" |
-| **Procedural** | skills (how to do X) | slow (half-life 180d) | SKILL.md body |
-| **Semantic** | facts, decisions, preferences, knowledge, episodic | normal (half-life 7–90d) | "auth uses jose not jsonwebtoken" |
+| **Procedural** | skills (how to do X) | normal | SKILL.md body |
+| **Semantic** | facts, decisions, preferences, knowledge, episodic | normal | "auth uses jose not jsonwebtoken" |
 
 Episodic is not a separate type — it's `Semantic` with `category=Episodic` + a timestamp.
 
 ## Edge types
 
-| Type | Direction | Default strength | Use |
-|---|---|---|---|
-| `related` | bidirectional | 0.4 | generic association (default) |
-| `supports` | bidirectional | 0.65 | A provides evidence for B |
-| `contradicts` | bidirectional | 0.85 | A and B are in conflict |
-| `supersedes` | source→target | 0.95 | A replaces B (memory evolution) |
+| Type | Direction | Use |
+|---|---|---|
+| `related` | bidirectional | generic association (default) |
+| `supports` | bidirectional | A provides evidence for B |
+| `contradicts` | bidirectional | A and B are in conflict |
+| `supersedes` | source→target | A replaces B (memory evolution) |
 
 ## Tunable parameters
 
-See [config.example.toml](docs/config.example.toml) for the full schema. The 5 most-tuned:
+See [config.example.toml](docs/config.example.toml) for the full schema. The 4 most-tuned:
 
 | Parameter | Default | What it does |
 |---|---|---|
@@ -256,7 +256,6 @@ See [config.example.toml](docs/config.example.toml) for the full schema. The 5 m
 | `forgetting.prune_confidence_threshold` | 0.1 | below this → prune candidate |
 | `forgetting.disable_forgetting` | false | true = archive mode (never forget) |
 | `search.weight_importance` | 0.2 | how much importance affects ranking |
-| `identity.user_char_limit` | 5000 | max size of USER.md |
 
 ## Performance targets
 
