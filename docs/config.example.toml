@@ -1,0 +1,70 @@
+# Mneme configuration
+# Copy to ~/.mneme/config.toml and edit.
+# Missing fields = use code defaults.
+
+[forgetting]
+# Base half-life in days (importance=0.5 → 90d, importance=1.0 → 135d)
+half_life_days = 90.0
+# How much importance modulates half-life (0=ignore, 1=±50%)
+half_life_importance_weight = 0.5
+# confidence below this → prune candidate
+prune_confidence_threshold = 0.1
+# confidence below this + days no access > prune_max_days_no_access → prune
+prune_min_confidence_for_candidate = 0.3
+prune_max_days_no_access = 30
+# importance above this → exempt from pruning
+prune_importance_exempt = 0.7
+# access boost factor: confidence *= 1 + ln(access_count+1) * factor
+access_boost_factor = 0.15
+# initial confidence for new memories
+initial_confidence_default = 1.0
+# default importance for new memories
+importance_default = 0.5
+# true = never decay (archive mode)
+disable_forgetting = false
+
+[edges]
+# auto-link strength for same topic_key
+auto_link_topic_strength = 0.6
+# text similarity in this range → trigger supersede detection
+auto_link_supersede_min_sim = 0.5
+auto_link_supersede_max_sim = 0.95
+# max edges per memory (truncate lowest strength)
+max_edges_per_memory = 50
+# edge decay half-life (independent of nodes)
+edge_decay_half_life_days = 60.0
+# edge strength floor (below → soft delete)
+edge_strength_floor = 0.05
+# default max hops for neighbor queries
+max_neighbor_hops = 2
+# master switch for auto-linking on add
+auto_link_enabled = true
+
+[search]
+default_limit = 10
+# score = bm25 * recency^w_r * importance^w_i * identity_match^w_id
+weight_relevance = 1.0
+weight_recency = 0.3
+weight_importance = 0.2
+weight_identity_match = 0.2
+
+[identity]
+# char limits for user / persona files
+user_char_limit = 5000
+persona_char_limit = 5000
+# require user confirmation before auto-updating identity files
+require_confirmation_on_update = true
+# LTM evidence count threshold for auto-update suggestions
+auto_update_min_evidence_count = 3
+
+[review]
+# session-end review batch size
+session_end_batch_size = 20
+# needs_review items older than this get downgraded
+needs_review_max_age_days = 7
+# (v0.2) enable identity reflection
+identity_reflection_enabled = false
+
+[storage]
+db_path = "~/.mneme/mneme.db"
+wal_mode = true

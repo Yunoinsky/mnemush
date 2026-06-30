@@ -1,0 +1,24 @@
+{
+  "name": "mneme-opencode",
+  "version": "0.1.0",
+  "description": "Mneme memory plugin for the OpenCode agent.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "echo 'no tests yet'"
+  },
+  "dependencies": {
+    "mneme-client": "*"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MulanPSL-2.0"
+}
