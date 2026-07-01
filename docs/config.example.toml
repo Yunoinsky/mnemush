@@ -1,6 +1,6 @@
 # Mneme configuration
 # Copy to ~/.mneme/config.toml and edit.
-# Missing fields = use code defaults.
+# Missing fields = use code defaults (see crates/mneme/src/config.rs).
 
 [forgetting]
 # Base half-life in days (importance=0.5 → 90d, importance=1.0 → 135d)
@@ -29,6 +29,15 @@ auto_link_topic_strength = 0.6
 # text similarity in this range → trigger supersede detection
 auto_link_supersede_min_sim = 0.5
 auto_link_supersede_max_sim = 0.95
+# Weak-similarity auto-link layer (added v0.2). On every memory_add, an
+# FTS5 OR-query against recent content computes Jaccard similarity; pairs
+# in `[weak_min, weak_max)` get a low-strength `related` edge (up to
+# `weak_limit` per new memory). Covers the gap between "same topic" and
+# "near-supersede" — surfaces related memories the explicit link missed.
+auto_link_weak_min_sim = 0.05
+auto_link_weak_max_sim = 0.5
+auto_link_weak_strength = 0.4
+auto_link_weak_limit = 3
 # edge decay half-life (independent of nodes)
 edge_decay_half_life_days = 60.0
 # default max hops for neighbor queries
@@ -45,3 +54,30 @@ weight_importance = 0.2
 
 [storage]
 db_path = "~/.mneme/mneme.db"
+
+# ── Environment variable overrides ──────────────────────────────────────
+# Applied after TOML is loaded. See apply_env_overrides() in
+# crates/mneme/src/config.rs.
+#
+#   MNEME_DATA_DIR=/some/path         override data dir (identity, db)
+#                                     falls back to ~/.mneme
+#   MNEME_DB_PATH=/some/path/foo.db   overrides db_path above (wins)
+#   MNEME_HALF_LIFE_DAYS=30.0         overrides [forgetting].half_life_days
+#   MNEME_DISABLE_FORGETTING=true     archive mode (never decay)
+#
+# The Pi extension additionally honors (set in shell or pi config):
+#   MNEME_PRUNE_ON_SESSION_END=apply  (default) — soft-delete up to N
+#   MNEME_PRUNE_ON_SESSION_END=dry    list candidates only, no write
+#   MNEME_PRUNE_ON_SESSION_END=off    skip the prune pass entirely
+#   MNEME_PRUNE_SESSION_LIMIT=5       cap candidates per session
+
+# ── Self-eval log bounds (v0.3) ─────────────────────────────────────────
+# The agent plugins write per-session NDJSON to ~/.mneme/eval/. These
+# three caps keep it bounded; applied at session_end in order: TTL,
+# per-file line cap, file-count cap.
+[eval]
+max_age_days = 30          # drop session files older than this (0 = keep all)
+max_entries_per_file = 5000 # keep the newest N lines per session file
+max_session_files = 30     # keep the N most-recent session files
+
+#   MNEME_EVAL_PRUNE_ON_SESSION_END=off   skip eval-log pruning at session_end

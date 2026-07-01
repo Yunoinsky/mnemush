@@ -37,10 +37,13 @@ pub type Result<T> = std::result::Result<T, MnemeError>;
 /// error is preserved as the inner `Box<dyn Error>`.
 impl From<MnemeError> for rusqlite::Error {
     fn from(e: MnemeError) -> Self {
-        rusqlite::Error::FromSqlConversionFailure(
-            0,
-            rusqlite::types::Type::Text,
-            Box::new(e),
-        )
+        // Use ToSqlConversionFailure (not FromSqlConversionFailure)
+        // so the Display impl shows the actual MnemeError message,
+        // not the generic "Conversion error from type Text at index: 0"
+        // wrapper that the previous version produced.
+        // This keeps `?` working in query_map closures that need to
+        // return rusqlite::Error, while making the error message
+        // actually useful for debugging.
+        rusqlite::Error::ToSqlConversionFailure(Box::new(e))
     }
 }

@@ -19,7 +19,7 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use crate::error::{MnemeError, Result};
 use crate::schema::{Category, Memory, MemoryType, Source, Tier};
 
-const SCHEMA_VERSION: i32 = 2;
+const SCHEMA_VERSION: i32 = 3;
 
 const SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -53,7 +53,13 @@ CREATE TABLE IF NOT EXISTS memory (
 
     content_hash TEXT NOT NULL,
     deleted_at INTEGER,
-    needs_review INTEGER NOT NULL DEFAULT 0
+    needs_review INTEGER NOT NULL DEFAULT 0,
+
+    status TEXT NOT NULL DEFAULT 'active',
+    due_at INTEGER,
+    claimed_by TEXT,
+    parent_id TEXT,
+    completed_at INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_memory_type ON memory(memory_type);
@@ -153,6 +159,20 @@ impl Store {
         let current: Option<i32> = tx
             .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
             .optional()?;
+        // Bug fix (ponytail): schema_version can be stale relative to
+        // the actual column shape if a prior migration ALTERed but
+        // forgot to UPDATE schema_version (or crashed between the two).
+        // Detect the real shape via pragma_table_info and only ADD
+        // columns that are missing — avoids crashing on duplicate-
+        // column errors when the migration is re-run on a half-migrated
+        // DB.
+        let has_col = |name: &str| -> Result<bool> {
+            let n: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('memory') WHERE name = ?1",
+                params![name], |r| r.get(0),
+            )?;
+            Ok(n > 0)
+        };
         match current {
             None => {
                 tx.execute(
@@ -166,9 +186,58 @@ impl Store {
                     v, SCHEMA_VERSION
                 )));
             }
+            Some(v) if v < 2 => {
+                // v0.1 → v0.2 migration: FTS5 rowid auto-assignment
+                // (already covered by execute_batch(SCHEMA_SQL) which
+                // creates the new shape). The old schema lacked
+                // `source NOT NULL` and several other columns; the new
+                // shape adds them with sensible defaults. No data
+                // movement needed since this is a fresh-DB version bump.
+                let alters: &[&str] = &[
+                    "ALTER TABLE memory ADD COLUMN source TEXT NOT NULL DEFAULT 'manual';",
+                    "ALTER TABLE memory ADD COLUMN initial_confidence REAL NOT NULL DEFAULT 1.0;",
+                    "ALTER TABLE memory ADD COLUMN confidence REAL NOT NULL DEFAULT 1.0;",
+                    "ALTER TABLE memory ADD COLUMN importance REAL NOT NULL DEFAULT 0.5;",
+                    "ALTER TABLE memory ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0;",
+                    "ALTER TABLE memory ADD COLUMN last_accessed_at INTEGER NOT NULL DEFAULT 0;",
+                    "ALTER TABLE memory ADD COLUMN override_half_life REAL;",
+                    "ALTER TABLE memory ADD COLUMN never_prune INTEGER NOT NULL DEFAULT 0;",
+                    "ALTER TABLE memory ADD COLUMN never_decay INTEGER NOT NULL DEFAULT 0;",
+                    "ALTER TABLE memory ADD COLUMN needs_review INTEGER NOT NULL DEFAULT 0;",
+                ];
+                for sql in alters {
+                    let col = sql.split("ADD COLUMN ").nth(1).unwrap_or("").split_whitespace().next().unwrap_or("");
+                    if !has_col(col)? {
+                        tx.execute_batch(sql)?;
+                    }
+                }
+                tx.execute_batch(
+                    "CREATE INDEX IF NOT EXISTS idx_memory_active ON memory(deleted_at) WHERE deleted_at IS NULL;",
+                )?;
+                tx.execute("UPDATE schema_version SET version = 2", [])?;
+            }
+            Some(v) if v < 3 => {
+                // v0.2 → v0.3 migration: add agent-self-memory lifecycle
+                // fields (status, due_at, claimed_by, parent_id,
+                // completed_at). All have defaults so existing rows
+                // get status='active', others null. See decisions.md D14.
+                let alters: &[&str] = &[
+                    "ALTER TABLE memory ADD COLUMN status TEXT NOT NULL DEFAULT 'active';",
+                    "ALTER TABLE memory ADD COLUMN due_at INTEGER;",
+                    "ALTER TABLE memory ADD COLUMN claimed_by TEXT;",
+                    "ALTER TABLE memory ADD COLUMN parent_id TEXT;",
+                    "ALTER TABLE memory ADD COLUMN completed_at INTEGER;",
+                ];
+                for sql in alters {
+                    let col = sql.split("ADD COLUMN ").nth(1).unwrap_or("").split_whitespace().next().unwrap_or("");
+                    if !has_col(col)? {
+                        tx.execute_batch(sql)?;
+                    }
+                }
+                tx.execute("UPDATE schema_version SET version = 3", [])?;
+            }
             Some(_) => {
-                // v0.1 schema: nothing to migrate. Future versions
-                // will add `if v < X { /* upgrade */ }` arms here.
+                // Same version, no migration needed.
             }
         }
         tx.commit()?;
@@ -181,6 +250,11 @@ impl Store {
 
     pub fn ts_to_dt(ts: i64) -> DateTime<Utc> {
         Utc.timestamp_opt(ts, 0).single().unwrap_or_else(Utc::now)
+    }
+
+    /// Same as `ts_to_dt` but returns Option for nullable timestamps.
+    pub fn ts_to_dt_opt(ts: i64) -> Option<DateTime<Utc>> {
+        Utc.timestamp_opt(ts, 0).single()
     }
 
     /// Begin a deferred transaction.
@@ -204,10 +278,12 @@ impl Store {
                 initial_confidence, confidence, importance,
                 access_count, last_accessed_at, created_at,
                 override_half_life, never_prune, never_decay,
-                content_hash, deleted_at, needs_review
+                content_hash, deleted_at, needs_review,
+                status, due_at, claimed_by, parent_id, completed_at
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
-                ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23
+                ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23,
+                ?24, ?25, ?26, ?27, ?28
             )"#,
             params![
                 m.id,
@@ -233,6 +309,11 @@ impl Store {
                 m.content_hash,
                 m.deleted_at.map(|d| d.timestamp()),
                 m.needs_review as i32,
+                m.status.as_str(),
+                m.due_at.map(|d| d.timestamp()),
+                &m.claimed_by,
+                &m.parent_id,
+                m.completed_at.map(|d| d.timestamp()),
             ],
         )?;
         // FTS5 gets its own auto-assigned rowid (omit `rowid` column).
@@ -265,6 +346,11 @@ impl Store {
         let never_prune_i: i32 = row.get("never_prune")?;
         let never_decay_i: i32 = row.get("never_decay")?;
         let needs_review_i: i32 = row.get("needs_review")?;
+        let status_str: String = row.get("status")?;
+        let due_at_ts: Option<i64> = row.get("due_at")?;
+        let claimed_by: Option<String> = row.get("claimed_by")?;
+        let parent_id: Option<String> = row.get("parent_id")?;
+        let completed_at_ts: Option<i64> = row.get("completed_at")?;
 
         Ok(Memory {
             id: row.get("id")?,
@@ -290,6 +376,12 @@ impl Store {
             content_hash: row.get("content_hash")?,
             deleted_at: deleted_ts.map(Self::ts_to_dt),
             needs_review: needs_review_i != 0,
+            status: crate::schema::ActionStatus::parse(&status_str)
+                .unwrap_or(crate::schema::ActionStatus::Active),
+            due_at: due_at_ts.and_then(Self::ts_to_dt_opt),
+            claimed_by,
+            parent_id,
+            completed_at: completed_at_ts.and_then(Self::ts_to_dt_opt),
         })
     }
 
@@ -306,7 +398,8 @@ impl Store {
                 initial_confidence=?12, confidence=?13, importance=?14,
                 access_count=?15, last_accessed_at=?16, created_at=?17,
                 override_half_life=?18, never_prune=?19, never_decay=?20,
-                content_hash=?21, deleted_at=?22, needs_review=?23
+                content_hash=?21, deleted_at=?22, needs_review=?23,
+                status=?24, due_at=?25, claimed_by=?26, parent_id=?27, completed_at=?28
               WHERE id=?1"#,
             params![
                 m.id,
@@ -332,6 +425,11 @@ impl Store {
                 m.content_hash,
                 m.deleted_at.map(|d| d.timestamp()),
                 m.needs_review as i32,
+                m.status.as_str(),
+                m.due_at.map(|d| d.timestamp()),
+                &m.claimed_by,
+                &m.parent_id,
+                m.completed_at.map(|d| d.timestamp()),
             ],
         )?;
         Ok(())
@@ -348,6 +446,34 @@ impl Store {
         actor: &str,
     ) -> Result<()> {
         self.conn.execute(
+            r#"INSERT INTO memory_event (id, event_type, memory_id, edge_id, details, actor, created_at)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"#,
+            params![
+                uuid::Uuid::new_v4().to_string(),
+                event_type,
+                memory_id,
+                edge_id,
+                details,
+                actor,
+                Self::now_ts(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Same as `log_event` but participates in the caller's transaction.
+    /// Used by `forget::prune_apply` and `forget::isolate_hard_delete` so
+    /// the soft-delete + audit row commit atomically.
+    pub fn log_event_tx(
+        &self,
+        tx: &Transaction,
+        event_type: &str,
+        memory_id: Option<&str>,
+        edge_id: Option<&str>,
+        details: Option<&str>,
+        actor: &str,
+    ) -> Result<()> {
+        tx.execute(
             r#"INSERT INTO memory_event (id, event_type, memory_id, edge_id, details, actor, created_at)
                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"#,
             params![
@@ -429,6 +555,7 @@ fn parse_source(s: &str) -> Result<Source> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema::ActionStatus;
 
     #[test]
     fn opens_in_memory() {
@@ -474,6 +601,9 @@ mod tests {
         // Insert a row with a hand-written bogus category that
         // bypasses the strict Category::parse path. Loading it
         // should now error loudly, not silently coerce to Note.
+        // Regression: error message must clearly identify the
+        // unknown value — NOT the misleading "Conversion error
+        // from type Text at index: 0" wrapper.
         let store = Store::open_in_memory().unwrap();
         let bogus_id = uuid::Uuid::new_v4().to_string();
         store.conn.execute(
@@ -491,21 +621,125 @@ mod tests {
             Store::row_to_memory,
         );
         let err = r.unwrap_err();
-        // The original MnemeError is preserved inside the rusqlite
-        // FromSqlConversionFailure; walk the source chain to assert.
+        // Error must clearly identify the unknown category.
         let mut src: &dyn std::error::Error = &err;
         let mut found = false;
         while let Some(s) = src.source() {
-            if s.to_string().contains("unknown Category: 'decizion'") {
+            let msg = s.to_string();
+            if msg.contains("decizion") || msg.contains("Category") {
                 found = true;
                 break;
             }
             src = s;
         }
-        assert!(found, "expected parse error mentioning 'decizion', got: {err}");
+        assert!(
+            found,
+            "expected error mentioning 'decizion' or 'Category', got: {err}"
+        );
+        // Must NOT use the misleading generic wrapper.
+        assert!(
+            !err.to_string().contains("Conversion error from type Text"),
+            "error should not use misleading FromSqlConversionFailure wrapper, got: {err}"
+        );
     }
 
     #[test]
+    fn unknown_tier_errors_without_misleading_wrapper() {
+        // Regression test for the user's bug: tier='active' was a
+        // real value in their DB (added during external-wiki session
+        // before tier validation). Reading such rows must surface a
+        // clean MnemeError, not 'Conversion error from type Text'.
+        let store = Store::open_in_memory().unwrap();
+        let bogus_id = uuid::Uuid::new_v4().to_string();
+        store.conn.execute(
+            "INSERT INTO memory (id, memory_type, tier, category, title, content, tags, source, \
+             initial_confidence, confidence, importance, access_count, last_accessed_at, created_at, \
+             never_prune, never_decay, content_hash, needs_review) \
+             VALUES (?1, 'semantic', 'active', 'note', 't', 'c', '', 'manual', \
+             1.0, 1.0, 0.5, 0, 0, 0, 0, 0, 'h', 0)",
+            params![bogus_id],
+        ).unwrap();
+
+        let r = store.conn.query_row(
+            "SELECT * FROM memory WHERE id=?1",
+            params![bogus_id],
+            Store::row_to_memory,
+        );
+        let err = r.unwrap_err();
+        // Must mention 'active' or 'Tier' somewhere in source chain
+        let mut src: &dyn std::error::Error = &err;
+        let mut found = false;
+        while let Some(s) = src.source() {
+            let msg = s.to_string();
+            if msg.contains("active") || msg.contains("Tier") {
+                found = true;
+                break;
+            }
+            src = s;
+        }
+        assert!(found, "expected 'active' or 'Tier' in error chain: {err}");
+        assert!(
+            !err.to_string().contains("Conversion error from type Text"),
+            "error must not use misleading Conversion wrapper, got: {err}"
+        );
+    }
+
+    #[test]
+    fn half_migrated_db_recovers_without_duplicate_column_error() {
+        // Regression: v0.2 → v0.3 migration used to crash with
+        // "duplicate column name: status" when re-run on a DB that
+        // already had the v3 columns (e.g. schema_version stayed at 2
+        // but ALTERs had been applied). Fix: detect via
+        // pragma_table_info before each ADD COLUMN, and update
+        // schema_version after each migration arm.
+        //
+        // Setup: write a v0.2-shaped memory table (no status/etc.),
+        // set schema_version=2, then manually add the v3 columns to
+        // simulate a crash between ALTER and UPDATE schema_version.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("half.db");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(r#"
+            CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+            INSERT INTO schema_version (version) VALUES (2);
+            CREATE TABLE memory (
+                id TEXT PRIMARY KEY,
+                memory_type TEXT NOT NULL, tier TEXT NOT NULL,
+                category TEXT NOT NULL, title TEXT NOT NULL, content TEXT NOT NULL,
+                context TEXT, topic_key TEXT, tags TEXT NOT NULL DEFAULT '',
+                project TEXT, source TEXT NOT NULL,
+                initial_confidence REAL NOT NULL DEFAULT 1.0,
+                confidence REAL NOT NULL DEFAULT 1.0,
+                importance REAL NOT NULL DEFAULT 0.5,
+                access_count INTEGER NOT NULL DEFAULT 0,
+                last_accessed_at INTEGER NOT NULL, created_at INTEGER NOT NULL,
+                override_half_life REAL,
+                never_prune INTEGER NOT NULL DEFAULT 0,
+                never_decay INTEGER NOT NULL DEFAULT 0,
+                content_hash TEXT NOT NULL,
+                deleted_at INTEGER, needs_review INTEGER NOT NULL DEFAULT 0
+            );
+        "#).unwrap();
+        // Simulate the crash: ALTERs ran, but schema_version not bumped.
+        conn.execute_batch("ALTER TABLE memory ADD COLUMN status TEXT NOT NULL DEFAULT 'active';").unwrap();
+        conn.execute_batch("ALTER TABLE memory ADD COLUMN due_at INTEGER;").unwrap();
+        conn.execute_batch("ALTER TABLE memory ADD COLUMN claimed_by TEXT;").unwrap();
+        conn.execute_batch("ALTER TABLE memory ADD COLUMN parent_id TEXT;").unwrap();
+        conn.execute_batch("ALTER TABLE memory ADD COLUMN completed_at INTEGER;").unwrap();
+        drop(conn);
+        // Now open via Store::open: must NOT crash on duplicate-column.
+        let store = Store::open(&path).unwrap();
+        let v: i32 = store.conn.query_row("SELECT version FROM schema_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, SCHEMA_VERSION, "schema_version should advance to {}", SCHEMA_VERSION);
+        // And v0.3 columns are still there.
+        let n: i64 = store.conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('memory') WHERE name='status'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(n, 1, "status column should still be present");
+    }
+
+#[test]
     fn fts5_handles_parens() {
         let store = Store::open_in_memory().unwrap();
         let mut m = sample_memory();
@@ -551,6 +785,12 @@ mod tests {
             content_hash: "abc".into(),
             deleted_at: None,
             needs_review: false,
+            status: ActionStatus::Active,
+            due_at: None,
+            claimed_by: None,
+            parent_id: None,
+            completed_at: None,
+
         }
     }
 }

@@ -26,6 +26,15 @@ cp "$BIN_PATH" ~/.cargo/bin/mneme-mcp
 cp crates/mneme/target/release/mneme ~/.cargo/bin/mneme 2>/dev/null || true
 chmod +x ~/.cargo/bin/mneme-mcp ~/.cargo/bin/mneme
 
+# macOS: ad-hoc re-sign after `cp`. The cp strips the original signature
+# from the built binary, and macOS will SIGKILL an unsigned binary
+# when it's launched (`mneme-mcp` silently exits with broken pipe on
+# every attempt). Ignore failure for non-macOS or missing codesign.
+if [[ "$(uname -s)" == "Darwin" ]] && command -v codesign >/dev/null 2>&1; then
+    codesign --force --sign - ~/.cargo/bin/mneme-mcp 2>/dev/null || true
+    codesign --force --sign - ~/.cargo/bin/mneme 2>/dev/null || true
+fi
+
 echo "→ Initializing ~/.mneme/..."
 ./crates/mneme/target/release/mneme init
 

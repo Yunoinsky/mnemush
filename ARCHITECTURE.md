@@ -45,10 +45,13 @@ lib.rs              — public API surface + shared helpers (expand_tilde, init_
 schema.rs           — Memory, Edge, MemoryType, Category, EdgeType, parse helpers
 config.rs           — Config + 5-layer override (default / global / project / env / per-memory)
 store.rs            — SQLite wrapper, migrations, manual FTS5 sync
-memory.rs           — high-level ops: add / search / get / update / delete / list + scanner
+memory.rs           — high-level ops: add / search / get / update / delete / list
+scanner.rs          — secret / PII pattern detection (called by add path)
 edge.rs             — edge ops: link / neighbors (recursive CTE BFS)
+graph.rs            — PageRank, label propagation, DOT / D3-JSON export (v0.3)
 forget.rs           — Ebbinghaus decay, active pruning, access boost
 identity.rs         — USER/PERSONA/CONSTITUTION file load + identity sync
+eval.rs             — self-eval NDJSON log maintenance (TTL / line / file caps)
 error.rs            — MnemeError + Result alias
 bin/mcp.rs          — MCP stdio server (5 tools)
 bin/cli.rs          — terminal CLI (clap)
@@ -73,7 +76,7 @@ TS adapter: validate, compute content_hash
   ↓
 MCP: memory_add → Rust
   ↓
-1. secret scanner (inline in memory.rs, no credential patterns in content)
+1. secret scanner (scanner.rs, blocks add on credential patterns)
 2. dedup (content_hash collision? skip)
 3. conflict (FTS5 similar entries; return candidates)
 4. topic_key normalized
@@ -105,34 +108,59 @@ MCP: memory_search → Rust
 
 ### Session lifecycle (v0.2)
 
+Actual hook flow in the pi extension (`packages/mneme-pi/src/index.ts`):
+
 ```
 session_start:
-  1. load identity files → inject into system prompt (frozen)
-  2. process needs_review queue
-  3. apply pending identity updates (if user approved)
-  4. load LTM graph (lazy — actually paged on demand)
+  1. connect to mneme-mcp (spawn subprocess)
+  2. sendStatus("🧠 mneme connected")
+  3. surfacePendingIdentityProposals() — async, non-blocking
+  4. surfaceReflectCandidateCount() — async, non-blocking
+  Identity files (USER/PERSONA/CONSTITUTION) are loaded by the
+  pi host from disk and injected into the system prompt (frozen
+  for the session); mneme doesn't re-read them.
 
-user turn:
-  1. L1: heuristic capture (regex on user message)
-     - "记住" / "remember" → auto-save @0.9
-     - correction patterns → auto-save as Correction
-  2. agent turn: agent may call memory tools as needed
+before_agent_start (each user prompt):
+  1. reset toolCallsThisTurn counter
+  2. L1 heuristic capture on event.prompt:
+     - looksLikeRemember(text) → memory_add(category=note, importance=0.9)
+       and sendStatus("🧠 saved (remember)")
+     - looksLikeCorrection(text) → memory_add(category=correction, importance=0.9)
+       and sendStatus("🧠 saved (correction)")
+  3. agent loop runs; agent may call memory tools on demand
 
-after tool call:
-  1. L1: heuristic capture (tool result analysis)
-     - errors → auto-save as Failure @0.7
-     - config file edits → auto-save as Convention @0.5
-  2. (v0.2) increment turn counter; trigger periodic review at 10 turns
-
-before_compact:
-  1. emergency_save: importance > 0.7 in recent 20 turns → mark needs_review
+after_tool_call (each tool result):
+  Two listeners, both skip our own tools (Pi + OpenCode namespaces)
+  so we never record our own failures as "tool failure" memories:
+  skip list covers Pi names (`memory`, `memory_get`, ..., identity_*, ...)
+  AND OpenCode names (`mneme-memory`, `mneme-memory_search`, ...).
+  - L1 error capture: if result.is_error && result.error →
+    memory_add(category=failure, importance=0.7, needs_review=true)
+  - Periodic insight nudge: increment counter; at the 6th
+    and 14th non-self tool call, sendStatus nudges the agent
+    to use memory_add(category=insight, importance=0.7)
 
 session_end:
-  1. (v0.2) full review pass on needs_review queue
-  2. (v0.2) edge decay
-  3. prune pass (math, fast)
-  4. (v0.2) identity reflection → write to pending_identity.json
-  5. flush any pending writes
+  1. runPruneOnSessionEnd() — default `apply` (soft-delete up
+     to MNEME_PRUNE_SESSION_LIMIT candidates, default 5);
+     set MNEME_PRUNE_ON_SESSION_END=dry to list only, =off to skip.
+     Hard-delete (`--isolate`) is NEVER auto-run.
+  2. runEdgeDecayOnSessionEnd() — default ON; runs
+     `mneme edge-decay` which recomputes every active edge's
+     strength via the same Ebbinghaus formula as memory confidence.
+     Set MNEME_EDGE_DECAY_ON_SESSION_END=off to skip. Without this
+     pass, edge strength is monotonically non-decreasing, so the
+     graph only grows noisier over time.
+  3. runNeedsReviewOnSessionEnd() — default ON; runs
+     `mneme process-needs-review` which clears the `needs_review`
+     flag on items older than MNEME_NEEDS_REVIEW_GRACE_DAYS (1d
+     default). For `category=failure` items, also downgrades
+     importance by 0.1 per pass so repeated errors fade out.
+     Set MNEME_NEEDS_REVIEW_ON_SESSION_END=off to skip. Without
+     this pass, the needs_review queue grows unboundedly (the
+     after_tool_call error capture sets the flag but no consumer
+     cleared it).
+  4. client.disconnect() — close mneme-mcp subprocess
 ```
 
 ## Storage
@@ -224,7 +252,7 @@ CREATE TABLE schema_version (
 ├── config.toml
 ├── mneme.db
 ├── mneme.db-wal            (WAL journal, transient)
-└── pending_identity.json   (v0.2: suggestions from identity reflection, transient)
+└── pending.jsonl           (v0.2: identity reflection proposals, transient)
 ```
 
 ## Memory types
@@ -269,7 +297,7 @@ See [config.example.toml](docs/config.example.toml) for the full schema. The 4 m
 
 ## Future directions
 
-See [ROADMAP.md](ROADMAP.md).
+See [ROADMAP.md](ROADMAP.md) for the planned v0.3+ scope.
 
 ## Why Rust + TS, not pure Rust
 
@@ -277,4 +305,4 @@ Pi and OpenCode agent runtimes are TypeScript. Their extension/plugin APIs are T
 
 Rust is the right choice for the core: single binary, fast startup, low memory, no runtime. TS is the right choice for the adapter layer: direct access to agent hooks, native JSON-RPC via stdio.
 
-See [DECISIONS.md](docs/DECISIONS.md) for the full rationale.
+See [decisions.md](docs/decisions.md) for the full rationale.

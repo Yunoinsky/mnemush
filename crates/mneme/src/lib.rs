@@ -15,7 +15,9 @@
 pub mod config;
 pub mod edge;
 pub mod error;
+pub mod eval;
 pub mod forget;
+pub mod graph;
 pub mod identity;
 pub mod memory;
 pub mod scanner;

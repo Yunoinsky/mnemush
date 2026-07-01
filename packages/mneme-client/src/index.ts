@@ -73,6 +73,11 @@ export interface Memory {
   content_hash: string;
   deleted_at: string | null;
   needs_review: boolean;
+  status: "active" | "completed" | "abandoned";
+  due_at: string | null;
+  claimed_by: string | null;
+  parent_id: string | null;
+  completed_at: string | null;
 }
 
 export interface SearchHit {
@@ -103,6 +108,27 @@ export interface Edge {
 export interface NeighborHit {
   memory: Memory;
   hop: number;
+}
+
+export interface IdentityProposal {
+  id: string;
+  target: string;
+  content: string;
+  reason: string;
+  evidence_count: number;
+  created_at: string;
+  resolved_at: string | null;
+  status: "pending" | "approved" | "rejected";
+}
+
+export interface MnemeStatus {
+  active: number;
+  soft_deleted: number;
+  edges: number;
+  needs_review: number;
+  prune_candidates: number;
+  reflect_candidates: number;
+  pending_proposals: number;
 }
 
 export interface AddOptions {
@@ -174,6 +200,25 @@ export function looksLikeRemember(text: string): boolean {
 /** Does this user message look like a correction / override? */
 export function looksLikeCorrection(text: string): boolean {
   return CORRECTION_RE.test(text);
+}
+
+/**
+ * True if the tool is one mneme itself registers (on any surface).
+ *
+ * Pi tools use no prefix (`memory`, `identity_propose`, ...); OpenCode
+ * tools use `mneme-` / `identity-` (hyphens). Prefix-matching covers
+ * both surfaces and future tools with no hand-maintained list to rot.
+ * No host tool starts with these prefixes, so the match is safe:
+ *   memory*   → memory, memory_get, memory_search, ...
+ *   identity* → identity_propose, identity-propose, ...
+ *   mneme*    → mneme_status, mneme-memory-search, ...
+ */
+export function isMnemeTool(name: string): boolean {
+  return (
+    name.startsWith("memory") ||
+    name.startsWith("identity") ||
+    name.startsWith("mneme")
+  );
 }
 
 // ── JSON-RPC plumbing ──────────────────────────────────────────
@@ -273,7 +318,7 @@ export class MnemeClient {
     await this.rpc("initialize", {
       protocolVersion: "2024-11-05",
       capabilities: {},
-      clientInfo: { name: "mneme-client", version: "0.1.0" },
+      clientInfo: { name: "mneme-client", version: "0.3.0" },
     });
     // Fire-and-forget notification.
     this.notify("notifications/initialized", {});
@@ -377,6 +422,158 @@ export class MnemeClient {
       id,
       max_hops: maxHops,
     })) as NeighborHit[];
+  }
+
+  /**
+   * Surface recent, under-connected memories for LLM reflection.
+   * Returns the candidate memories; the LLM decides which conceptual
+   * links the auto-link layer missed and calls `memoryLink` for each.
+   */
+  async memoryReflect(opts: { sinceDays?: number; limit?: number } = {}): Promise<Memory[]> {
+    const args: Record<string, unknown> = {};
+    if (opts.sinceDays !== undefined) args.since_days = opts.sinceDays;
+    if (opts.limit !== undefined) args.limit = opts.limit;
+    return (await this.callTool("memory_reflect", args)) as Memory[];
+  }
+
+  /**
+   * One-line summary of memory system state. Returns counts of
+   * active/soft-deleted memories, edges, needs_review, prune
+   * candidates (matching should_prune), reflect candidates, and
+   * pending identity proposals. No arguments.
+   */
+  async mnemeStatus(): Promise<MnemeStatus> {
+    return (await this.callTool("mneme_status", {})) as MnemeStatus;
+  }
+
+  // ── v0.3 agent self-memory (commitments / actions) ──────────────
+
+  /**
+   * Return the highest-priority active commitment (an action with
+   * status=active and category != 'identity'). Returns null when no
+   * commitments exist. Priority order:
+   *   1. due_at ASC (nulls last) — deadlines win
+   *   2. created_at DESC — newest commitment for no-deadline case
+   *   3. id DESC — stable tie-break when timestamps collide
+   */
+  async memoryNext(): Promise<Memory | null> {
+    const out = (await this.callTool("memory_next", {})) as Memory | null;
+    return out ?? null;
+  }
+
+  /**
+   * Return all active commitments (status=active, category != 'identity').
+   * Useful for "what should I be working on?" overviews.
+   */
+  async memoryFrontier(): Promise<Memory[]> {
+    const out = (await this.callTool("memory_frontier", {})) as Memory[] | null;
+    return out ?? [];
+  }
+
+  /**
+   * Create a commitment (an action the agent owes work on). Distinct
+   * from memoryAdd in that the category is implicitly an action (the
+   * server treats the result as status=active by default). Pass
+   * `due_at` as a unix timestamp (seconds) for time-bound work.
+   */
+  async memoryActionCreate(opts: {
+    title: string;
+    content: string;
+    importance?: number;
+    due_at?: number;
+    claimed_by?: string;
+    parent_id?: string;
+    tags?: string[];
+  }): Promise<Memory> {
+    const args: Record<string, unknown> = {
+      title: opts.title,
+      content: opts.content,
+    };
+    if (opts.importance !== undefined) args.importance = opts.importance;
+    if (opts.due_at !== undefined) args.due_at = opts.due_at;
+    if (opts.claimed_by !== undefined) args.claimed_by = opts.claimed_by;
+    if (opts.parent_id !== undefined) args.parent_id = opts.parent_id;
+    if (opts.tags) args.tags = opts.tags;
+    return (await this.callTool("memory_action_create", args)) as Memory;
+  }
+
+  /**
+   * Update a commitment. On status transition to 'completed' or
+   * 'abandoned' the server auto-sets `completed_at`; on transition
+   * back to 'active' the server clears it. The returned Memory
+   * reflects the post-write state (lifecycle fields included).
+   */
+  async memoryActionUpdate(opts: {
+    id: string;
+    status?: "active" | "completed" | "abandoned";
+    due_at?: number | null;
+    claimed_by?: string | null;
+    importance?: number;
+  }): Promise<Memory> {
+    const args: Record<string, unknown> = { id: opts.id };
+    if (opts.status !== undefined) args.status = opts.status;
+    if (opts.due_at !== undefined) args.due_at = opts.due_at;
+    if (opts.claimed_by !== undefined) args.claimed_by = opts.claimed_by;
+    if (opts.importance !== undefined) args.importance = opts.importance;
+    return (await this.callTool("memory_action_update", args)) as Memory;
+  }
+
+  /**
+   * Explicit save of one or more search hits as memories. Distinct
+   * from memory_add: input is search-hit ids, not raw content. NEVER
+   * auto-save — only call when the user signals retention.
+   */
+  async memorySaveSearchResult(opts: {
+    ids: string[];
+    query: string;
+    category?: string;
+    importance?: number;
+  }): Promise<{ saved: string[]; errors: string[] }> {
+    const args: Record<string, unknown> = {
+      ids: opts.ids,
+      query: opts.query,
+    };
+    if (opts.category !== undefined) args.category = opts.category;
+    if (opts.importance !== undefined) args.importance = opts.importance;
+    return (await this.callTool("memory_save_search_result", args)) as {
+      saved: string[];
+      errors: string[];
+    };
+  }
+
+  // ── Identity reflection (v0.2) ────────────────────────────────────
+
+  async identityPropose(opts: {
+    target: "USER.md" | "PERSONA.md" | "CONSTITUTION.md";
+    content: string;
+    reason: string;
+    evidenceCount?: number;
+  }): Promise<IdentityProposal> {
+    const args: Record<string, unknown> = {
+      target: opts.target,
+      content: opts.content,
+      reason: opts.reason,
+    };
+    if (opts.evidenceCount !== undefined) args.evidence_count = opts.evidenceCount;
+    return (await this.callTool("identity_propose", args)) as IdentityProposal;
+  }
+
+  async identityListPending(opts: {
+    status?: "pending" | "approved" | "rejected";
+    all?: boolean;
+  } = {}): Promise<IdentityProposal[]> {
+    const args: Record<string, unknown> = {};
+    if (opts.status) args.status = opts.status;
+    if (opts.all) args.all = true;
+    return (await this.callTool("identity_list_pending", args)) as IdentityProposal[];
+  }
+
+  async identityApprove(id: string): Promise<IdentityProposal | null> {
+    return (await this.callTool("identity_approve", { id })) as IdentityProposal | null;
+  }
+
+  async identityReject(id: string): Promise<IdentityProposal | null> {
+    return (await this.callTool("identity_reject", { id })) as IdentityProposal | null;
   }
 
   private async callTool(name: string, args: Record<string, unknown>): Promise<unknown> {

@@ -19,6 +19,7 @@ pub struct Config {
     pub edges: EdgeConfig,
     pub search: SearchConfig,
     pub storage: StorageConfig,
+    pub eval: EvalConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,7 +33,6 @@ pub struct ForgettingConfig {
     pub prune_importance_exempt: f32,
     pub access_boost_factor: f32,
     pub initial_confidence_default: f32,
-    pub importance_default: f32,
     pub disable_forgetting: bool,
 }
 
@@ -47,7 +47,6 @@ impl Default for ForgettingConfig {
             prune_importance_exempt: 0.7,
             access_boost_factor: 0.15,
             initial_confidence_default: 1.0,
-            importance_default: 0.5,
             disable_forgetting: false,
         }
     }
@@ -59,6 +58,18 @@ pub struct EdgeConfig {
     pub auto_link_topic_strength: f32,
     pub auto_link_supersede_min_sim: f32,
     pub auto_link_supersede_max_sim: f32,
+    /// Lower bound for the weak-similarity auto-link layer. Jaccard
+    /// similarity below this is treated as noise.
+    pub auto_link_weak_min_sim: f32,
+    /// Upper bound for the weak-similarity auto-link layer. Jaccard
+    /// similarity in `[weak_min, weak_max)` is added as a low-strength
+    /// `related` edge. The supersede range is `[supersede_min, supersede_max]`,
+    /// so by default the weak layer covers `[0.05, 0.5)`.
+    pub auto_link_weak_max_sim: f32,
+    /// Strength assigned to weak-similarity auto-link edges.
+    pub auto_link_weak_strength: f32,
+    /// Max number of weak-similarity auto-link edges per new memory.
+    pub auto_link_weak_limit: usize,
     pub edge_decay_half_life_days: f32,
     pub max_neighbor_hops: usize,
     pub auto_link_enabled: bool,
@@ -70,6 +81,10 @@ impl Default for EdgeConfig {
             auto_link_topic_strength: 0.6,
             auto_link_supersede_min_sim: 0.5,
             auto_link_supersede_max_sim: 0.95,
+            auto_link_weak_min_sim: 0.05,
+            auto_link_weak_max_sim: 0.5,
+            auto_link_weak_strength: 0.4,
+            auto_link_weak_limit: 3,
             edge_decay_half_life_days: 60.0,
             max_neighbor_hops: 2,
             auto_link_enabled: true,
@@ -107,6 +122,44 @@ impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             db_path: "~/.mneme/mneme.db".to_string(),
+        }
+    }
+}
+
+/// Bounds for the per-session self-eval NDJSON log
+/// (`~/.mneme/eval/<session>.ndjson`). Three caps, applied in order:
+///   1. Files older than `max_age_days` are removed (TTL).
+///   2. Each surviving file is truncated to the most recent
+///      `max_entries_per_file` lines (drop oldest).
+///   3. If more than `max_session_files` files remain, the oldest are
+///      removed until the cap holds (size cap).
+///
+/// Why all three:
+///   - age alone leaves the count unbounded for heavy users
+///   - count alone can keep ancient dead sessions
+///   - size alone (lines per file) lets a single session dominate
+/// Apply via `mneme eval prune [--apply]` or auto at session_end.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EvalConfig {
+    pub max_age_days: i64,
+    pub max_entries_per_file: usize,
+    pub max_session_files: usize,
+}
+
+impl Default for EvalConfig {
+    fn default() -> Self {
+        Self {
+            // 30 days covers a typical monthly review cycle; users who
+            // want longer history can override via [eval] in config.toml.
+            max_age_days: 30,
+            // 5000 lines ≈ 250 KB per file. Heavy session (lots of
+            // tool calls) hits this; the cap drops the oldest entries
+            // (the recent ones are the ones the user is reviewing).
+            max_entries_per_file: 5000,
+            // 30 files ≈ 30 distinct sessions of history. Keeps the
+            // dir scannable and bounds the cost of `mneme eval stats`.
+            max_session_files: 30,
         }
     }
 }
@@ -180,6 +233,17 @@ impl Config {
                 "search.default_limit must be > 0".into(),
             ));
         }
+        if self.eval.max_age_days < 0 {
+            return Err(MnemeError::Config("eval.max_age_days must be >= 0".into()));
+        }
+        if self.eval.max_entries_per_file == 0 {
+            return Err(MnemeError::Config(
+                "eval.max_entries_per_file must be > 0".into(),
+            ));
+        }
+        if self.eval.max_session_files == 0 {
+            return Err(MnemeError::Config("eval.max_session_files must be > 0".into()));
+        }
         Ok(())
     }
 }
@@ -199,6 +263,15 @@ fn apply_env_overrides(cfg: &mut Config) {
     if let Ok(v) = std::env::var("MNEME_DISABLE_FORGETTING") {
         if let Ok(b) = v.parse() {
             cfg.forgetting.disable_forgetting = b;
+        }
+    }
+    // MNEME_DATA_DIR is the high-level override (also used for identity
+    // files). If set and the config didn't explicitly point db_path
+    // elsewhere, derive the db path from it so the CLI/MCP share the
+    // same data dir across commands.
+    if std::env::var("MNEME_DB_PATH").is_err() {
+        if let Ok(dir) = std::env::var("MNEME_DATA_DIR") {
+            cfg.storage.db_path = format!("{}/mneme.db", dir);
         }
     }
     if let Ok(v) = std::env::var("MNEME_DB_PATH") {

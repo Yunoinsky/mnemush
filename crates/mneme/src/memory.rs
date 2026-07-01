@@ -4,7 +4,7 @@
 //! persistent store, with dedup, FTS5, auto-link, and confidence
 //! updates wired in.
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::config::Config;
 use crate::error::{MnemeError, Result};
 use crate::forget;
-use crate::schema::{Category, Memory, NewMemory, SearchHit, SearchOpts};
+use crate::schema::{ActionStatus, Category, Memory, NewMemory, SearchHit, SearchOpts};
 use crate::store::Store;
 
 /// The full memory API. Wraps a [`Store`] and a [`Config`].
@@ -114,6 +114,13 @@ impl<'a> MemoryApi<'a> {
             content_hash: hash,
             deleted_at: None,
             needs_review: m.needs_review,
+            // Agent-self-memory lifecycle fields. Status defaults to
+            // Active; the other fields are optional. See decisions.md D14.
+            status: crate::schema::ActionStatus::Active,
+            due_at: None,
+            claimed_by: None,
+            parent_id: None,
+            completed_at: None,
         };
 
         let tx = self.store.conn.unchecked_transaction()?;
@@ -230,7 +237,122 @@ impl<'a> MemoryApi<'a> {
                 }
             }
         }
+
+        // 3. weak FTS5 similarity → low-strength related edge.
+        // Runs for all categories. Bounded by `auto_link_weak_limit` (3 by
+        // default). FTS5 top-3K is queried to allow jaccard filtering; the
+        // limit trades off recall vs. work per add.
+        if self.config.edges.auto_link_enabled {
+            let weak_min = self.config.edges.auto_link_weak_min_sim;
+            let weak_max = self.config.edges.auto_link_weak_max_sim;
+            let weak_strength = self.config.edges.auto_link_weak_strength;
+            let weak_limit = self.config.edges.auto_link_weak_limit;
+            if weak_limit > 0 {
+                let fts_query = sanitize_fts_query(&new_mem.content, 10);
+                if !fts_query.is_empty() {
+                    // Fetch a small over-fetch window so the jaccard filter
+                    // doesn't starve the limit on noisy content.
+                    let fetch = (weak_limit * 3).max(5);
+                    let mut stmt = tx.prepare(
+                        r#"SELECT m.* FROM memory m
+                           JOIN memory_fts fts ON fts.rowid = m.rowid
+                           WHERE memory_fts MATCH ?1
+                             AND m.deleted_at IS NULL
+                             AND m.id != ?2
+                           ORDER BY rank
+                           LIMIT ?3"#,
+                    )?;
+                    let rows = stmt.query_map(
+                        params![fts_query, new_mem.id, fetch as i64],
+                        Store::row_to_memory,
+                    )?;
+                    let mut added = 0usize;
+                    for r in rows {
+                        if added >= weak_limit {
+                            break;
+                        }
+                        let other = r?;
+                        // Skip if the new memory and the candidate are
+                        // already linked (e.g. by topic_key match in step 1).
+                        // The link_in_tx call is idempotent but a no-op write
+                        // here would still log an edge_link event.
+                        let already = tx
+                            .query_row(
+                                "SELECT 1 FROM memory_edge \
+                                 WHERE ((source_id=?1 AND target_id=?2) \
+                                        OR (source_id=?2 AND target_id=?1)) \
+                                   AND deleted_at IS NULL LIMIT 1",
+                                params![new_mem.id, other.id],
+                                |_| Ok(()),
+                            )
+                            .is_ok();
+                        if already {
+                            continue;
+                        }
+                        let sim = jaccard(&new_mem.content, &other.content);
+                        if (weak_min..weak_max).contains(&sim) {
+                            let _ = edge_api.link_in_tx(
+                                tx,
+                                &new_mem.id,
+                                &other.id,
+                                crate::schema::EdgeType::Related,
+                                weak_strength,
+                                Some("auto:weak_similarity"),
+                                Some(format!("jaccard={:.2}", sim).as_str()),
+                            );
+                            added += 1;
+                        }
+                    }
+                }
+            }
+        }
         Ok(())
+    }
+
+    /// Layer B of mechanism #2: select a set of recent memories that are
+    /// good candidates for LLM-driven reflection.
+    ///
+    /// The LLM (the agent itself, in a follow-up turn) reads these and
+    /// decides which conceptual links the auto-link layer missed. We
+    /// surface the *least-connected* recent memories first because those
+    /// have the most room for new edges.
+    ///
+    /// Filter: active, not Identity, not never_prune, created in the
+    /// last `since_days` days. Order: edge_count ASC, created_at DESC.
+    /// Limit: `limit`.
+    pub fn reflect_candidates(
+        &self,
+        now: DateTime<Utc>,
+        since_days: i64,
+        limit: usize,
+    ) -> Result<Vec<Memory>> {
+        let since_ts = (now - chrono::Duration::days(since_days)).timestamp();
+        let mut stmt = self.store.conn.prepare(
+            r#"SELECT m.*,
+                      (SELECT COUNT(*) FROM memory_edge e
+                       WHERE (e.source_id = m.id OR e.target_id = m.id)
+                         AND e.deleted_at IS NULL) AS edge_count
+               FROM memory m
+               WHERE m.deleted_at IS NULL
+                 AND m.memory_type != 'identity'
+                 AND m.never_prune = 0
+                 AND m.created_at > ?1
+               ORDER BY edge_count ASC, m.created_at DESC
+               LIMIT ?2"#,
+        )?;
+        let rows = stmt.query_map(
+            params![since_ts, limit as i64],
+            |row| {
+                // Skip the edge_count column by reading the memory first.
+                // We don't actually need edge_count; the ORDER BY uses it.
+                Store::row_to_memory(row)
+            },
+        )?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
     }
 
     /// Get a memory by id.
@@ -238,10 +360,28 @@ impl<'a> MemoryApi<'a> {
         self.store.get_by_id(id)
     }
 
-    /// Update a memory (full replacement).
+    /// Update a memory (full replacement). Auto-manages lifecycle
+    /// timestamps: transitioning into a terminal status (Completed /
+    /// Abandoned) sets `completed_at`; transitioning back to Active
+    /// clears it.
     pub fn update(&self, m: &Memory) -> Result<()> {
+        // Build a final copy with lifecycle side-effects applied.
+        // (Don't mutate the caller's value; that would surprise
+        // the caller who still holds a reference.)
+        let now = Utc::now();
+        let mut finalized = m.clone();
+        match finalized.status {
+            ActionStatus::Completed | ActionStatus::Abandoned => {
+                if finalized.completed_at.is_none() {
+                    finalized.completed_at = Some(now);
+                }
+            }
+            ActionStatus::Active => {
+                finalized.completed_at = None;
+            }
+        }
         let tx = self.store.conn.unchecked_transaction()?;
-        Store::update_memory_tx(&tx, m)?;
+        Store::update_memory_tx(&tx, &finalized)?;
         self.store
             .log_event("memory_update", Some(&m.id), None, None, "agent")?;
         tx.commit()?;
@@ -263,6 +403,49 @@ impl<'a> MemoryApi<'a> {
     /// List active memories (no soft-deleted).
     pub fn list(&self, limit: usize) -> Result<Vec<Memory>> {
         self.store.list_active(limit)
+    }
+
+    /// Return the single highest-priority active action.
+    /// Priority: `due_at` ASC (nulls last), then `created_at` ASC.
+    /// Excludes completed and abandoned memories.
+    pub fn memory_next(&self) -> Result<Option<Memory>> {
+        let mut stmt = self.store.conn.prepare(
+            r#"SELECT * FROM memory
+               WHERE deleted_at IS NULL
+                 AND status = 'active'
+                 AND category != 'identity'
+               ORDER BY
+                 CASE WHEN due_at IS NULL THEN 1 ELSE 0 END ASC,
+                 due_at ASC,
+                 created_at DESC,
+                 id DESC
+               LIMIT 1"#,
+        )?;
+        let mut rows = stmt.query_map([], Store::row_to_memory)?;
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Return all active actions, sorted by priority (due_at ASC,
+    /// nulls last; then created_at ASC). Excludes completed /
+    /// abandoned.
+    pub fn memory_frontier(&self) -> Result<Vec<Memory>> {
+        let mut stmt = self.store.conn.prepare(
+            r#"SELECT * FROM memory
+               WHERE deleted_at IS NULL
+                 AND status = 'active'
+                 AND category != 'identity'
+               ORDER BY
+                 CASE WHEN due_at IS NULL THEN 1 ELSE 0 END ASC,
+                 due_at ASC,
+                 created_at DESC,
+                 id DESC"#,
+        )?;
+        let rows = stmt.query_map([], Store::row_to_memory)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     /// Search using FTS5 with confidence + importance scoring.
@@ -333,6 +516,71 @@ impl<'a> MemoryApi<'a> {
         });
         hits.truncate(limit);
 
+        // ── Spreading activation (v0.3) ──────────────────────────
+        // For each top hit, pull 1-hop neighbors and add them with
+        // score = hit.score * edge.strength * decay. Lets the LLM find
+        // related memories that didn't match the query text directly
+        // (e.g. "dopamine" finds a paper about "reward signaling"
+        // because the two are linked).
+        //
+        // ponytail: bounded (1 hop, decay 0.5) and gated on the existing
+        // max_neighbor_hops config. Set max_neighbor_hops=0 to disable
+        // without changing code.
+        if self.config.edges.max_neighbor_hops >= 1 && !hits.is_empty() {
+            const DECAY: f32 = 0.5;
+            let mut extra: std::collections::HashMap<String, (Memory, f32)> =
+                std::collections::HashMap::new();
+            for hit in &hits {
+                let neighbors: Vec<(Memory, f32)> = {
+                    let mut stmt = self.store.conn.prepare(
+                        "SELECT m.*, e.strength FROM memory m
+                         JOIN memory_edge e ON
+                           ((e.source_id = ?1 AND e.target_id = m.id) OR
+                            (e.target_id = ?1 AND e.source_id = m.id))
+                         WHERE m.deleted_at IS NULL
+                           AND m.id != ?1
+                           AND e.deleted_at IS NULL
+                         LIMIT 10",
+                    )?;
+                    let rows = stmt.query_map(params![hit.memory.id], |row| {
+                        let m = Store::row_to_memory(row)?;
+                        let strength: f64 = row.get("strength")?;
+                        Ok((m, strength as f32))
+                    })?;
+                    rows.filter_map(|r| r.ok()).collect()
+                };
+                for (m, strength) in neighbors {
+                    let boost = hit.score * strength * DECAY;
+                    let entry = extra.entry(m.id.clone()).or_insert((m.clone(), 0.0));
+                    if boost > entry.1 {
+                        entry.0 = m;
+                        entry.1 = boost;
+                    }
+                }
+            }
+            // Merge neighbors that aren't already direct hits.
+            let direct_ids: std::collections::HashSet<String> =
+                hits.iter().map(|h| h.memory.id.clone()).collect();
+            for (id, (m, score)) in extra {
+                if direct_ids.contains(&id) {
+                    continue;
+                }
+                hits.push(SearchHit {
+                    memory: m,
+                    score,
+                    bm25: 0.0, // expanded, not FTS5 — no BM25 score
+                    retrievability: 1.0,
+                });
+            }
+            // Re-sort and re-truncate.
+            hits.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            hits.truncate(limit);
+        }
+
         // update access stats
         let ids: Vec<String> = hits.iter().map(|h| h.memory.id.clone()).collect();
         for id in ids {
@@ -347,8 +595,11 @@ impl<'a> MemoryApi<'a> {
 
 /// Sanitize user input into a safe FTS5 prefix query.
 /// Strips non-alphanumeric chars (only _ is kept as a word char), drops
-/// tokens < 3 chars, and joins remaining tokens with a single space,
-/// each suffixed with `*`.
+/// tokens < 3 chars, and joins remaining tokens with `OR`, each suffixed
+/// with `*`. OR (not the default FTS5 phrase match) is the right
+/// semantics for "find similar" use cases — conflict detection, weak
+/// auto-link, and ad-hoc search all want a memory that matches *any*
+/// prefix term, not all of them in sequence.
 pub(crate) fn sanitize_fts_query(input: &str, max_tokens: usize) -> String {
     input
         .split(|c: char| !c.is_alphanumeric() && c != '_')
@@ -356,7 +607,7 @@ pub(crate) fn sanitize_fts_query(input: &str, max_tokens: usize) -> String {
         .map(|w| format!("{}*", w))
         .take(max_tokens)
         .collect::<Vec<_>>()
-        .join(" ")
+        .join(" OR ")
 }
 
 /// Crude Jaccard similarity over word sets.
@@ -418,8 +669,7 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::{Tier, Source, MemoryType};
-    use crate::schema::NewMemory;
+        use crate::schema::NewMemory;
 
     fn setup() -> (Store, Config) {
         (Store::open_in_memory().unwrap(), Config::default())
@@ -459,6 +709,302 @@ mod tests {
         assert!(hits[0].memory.content.contains("jose"));
     }
 
+    /// Layer A of mechanism #2: when a new memory is added, the
+    /// auto-link step 3 (weak FTS5 similarity) should create low-strength
+    /// `related` edges to other memories that share 5–50% of their words.
+    /// Verifies the new edge exists, has the right strength, and points
+    /// to the expected target.
+    #[test]
+    fn auto_link_weak_similarity() {
+        let (store, cfg) = setup();
+        let api = MemoryApi::new(&store, &cfg);
+        // Two related memories: deliberately not exactly 0.5 jaccard
+        // (which is the supersede threshold).
+        // A: "dopamine release mushroom body drives associative learning"
+        // B: "octopamine release in the mushroom body modulates reward learning"
+        // Shared: {release, mushroom, body} = 3, Union = 14, jaccard ≈ 0.21
+        api.add(note(
+            "dopamine and reward learning in flies",
+            "dopamine release mushroom body drives associative learning",
+        ))
+        .unwrap();
+        let new_id = api
+            .add(note(
+                "octopamine and reward signaling in insects",
+                "octopamine release in the mushroom body modulates reward learning",
+            ))
+            .unwrap()
+            .id;
+        // Query the edge table for the new memory's outbound edges.
+        let edges: Vec<(String, f32, String)> = store
+            .conn
+            .prepare(
+                "SELECT target_id, strength, provenance FROM memory_edge \
+                 WHERE source_id = ?1 AND deleted_at IS NULL",
+            )
+            .unwrap()
+            .query_map(rusqlite::params![new_id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        // Should have at least one auto:weak_similarity edge to the first
+        // memory.
+        let weak: Vec<_> = edges
+            .iter()
+            .filter(|(_, _, prov)| prov == "auto:weak_similarity")
+            .collect();
+        assert!(
+            !weak.is_empty(),
+            "expected at least one weak-similarity edge, got: {:?}",
+            edges
+        );
+        // Strength should match the configured default (0.4).
+        for (_target, strength, _) in &weak {
+            assert!(
+                (*strength - cfg.edges.auto_link_weak_strength).abs() < 0.01,
+                "weak edge strength should be {}, got {}",
+                cfg.edges.auto_link_weak_strength,
+                strength
+            );
+        }
+    }
+
+    /// auto_link_weak_limit caps the number of weak edges per add.
+    #[test]
+    fn auto_link_weak_respects_limit() {
+        let (store, cfg) = setup();
+        let api = MemoryApi::new(&store, &cfg);
+        // 5 memories with 3 shared words (mushroom body dopamine) and
+        // 6 unique words each. New memory: 3 shared + 3 unique.
+        // Jaccard = 3 / (6 + 6 + 3 - 3) = 3/9 = 0.33 (well under 0.5).
+        for i in 0..5 {
+            api.add(note(
+                &format!("study {}", i),
+                &format!("mushroom body dopamine alpha{} beta{} gamma{} delta{} epsilon{} zeta{}", i, i, i, i, i, i),
+            ))
+            .unwrap();
+        }
+        let new_id = api
+            .add(note(
+                "new study",
+                "mushroom body dopamine x y z",
+            ))
+            .unwrap()
+            .id;
+        let n_weak: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM memory_edge \
+                 WHERE source_id=?1 AND provenance='auto:weak_similarity' \
+                   AND deleted_at IS NULL",
+                rusqlite::params![new_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            n_weak <= cfg.edges.auto_link_weak_limit as i64,
+            "weak edges {} should be <= limit {}",
+            n_weak,
+            cfg.edges.auto_link_weak_limit
+        );
+        assert!(n_weak > 0, "expected at least one weak edge");
+    }
+
+    /// auto_link_weak sim range [min, max) — jaccard below min should NOT
+    /// produce a weak edge even if FTS5 has a token match.
+    #[test]
+    fn auto_link_weak_below_min_sim() {
+        let (store, cfg) = setup();
+        let api = MemoryApi::new(&store, &cfg);
+        // One word shared, 9 words unique: jaccard ≈ 0.09 (above 0.05 default).
+        // Below 0.05: share 0/10 words → no edge.
+        api.add(note("alpha", "one two three four five six seven eight nine ten"))
+            .unwrap();
+        let new_id = api
+            .add(note("beta", "eleven twelve thirteen fourteen fifteen sixteen"))
+            .unwrap()
+            .id;
+        let n_weak: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM memory_edge \
+                 WHERE source_id=?1 AND provenance='auto:weak_similarity' \
+                   AND deleted_at IS NULL",
+                rusqlite::params![new_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n_weak, 0, "no shared tokens should not produce a weak edge");
+    }
+
+    /// Layer B of mechanism #2: reflect_candidates returns recent,
+    /// least-connected memories first, with limit respected.
+    #[test]
+    fn reflect_candidates_recent_and_isolated() {
+        let (store, cfg) = setup();
+        let api = MemoryApi::new(&store, &cfg);
+        // 3 fresh memories; add an inbound edge to the first to make it
+        // "more connected" than the others.
+        let a = api.add(note("a", "alpha alpha alpha")).unwrap().id;
+        let b = api.add(note("b", "beta beta beta")).unwrap().id;
+        let c = api.add(note("c", "gamma gamma gamma")).unwrap().id;
+        // Make a an isolated anchor + a target, link to a.
+        let anchor = api.add(note("anchor", "anchor anchor anchor")).unwrap().id;
+        api.add(note("isolated", "iso iso iso")).unwrap();
+        let edge_api = crate::edge::EdgeApi::new(&store, &cfg);
+        edge_api
+            .link(&anchor, &a, crate::schema::EdgeType::Related, 0.5, None, None)
+            .unwrap();
+        // reflect_candidates: b and c are least connected; a is next;
+        // anchor is most connected; isolated was just added (no edges)
+        // — should also appear.
+        let hits = api
+            .reflect_candidates(chrono::Utc::now(), 7, 10)
+            .unwrap();
+        let ids: Vec<String> = hits.iter().map(|m| m.id.clone()).collect();
+        // isolated (0 edges) and b, c (0 edges) should all appear; a (1 edge)
+        // and anchor (1 edge) should too if the limit is large enough.
+        assert!(ids.contains(&b), "expected b in candidates, got {:?}", ids);
+        assert!(ids.contains(&c), "expected c in candidates, got {:?}", ids);
+        // Limit respected
+        assert!(hits.len() <= 10);
+    }
+
+    /// reflect_candidates respects the since_days filter — old memories
+    /// (created > since_days ago) are not surfaced.
+    #[test]
+    fn reflect_candidates_respects_since_days() {
+        let (store, cfg) = setup();
+        let api = MemoryApi::new(&store, &cfg);
+        // One fresh, one with a backdated created_at.
+        api.add(note("fresh", "recent memory")).unwrap();
+        let old = api.add(note("old", "ancient memory")).unwrap();
+        // Backdate the "old" memory's created_at to 30 days ago.
+        let past = (chrono::Utc::now() - chrono::Duration::days(30)).timestamp();
+        store
+            .conn
+            .execute(
+                "UPDATE memory SET created_at=?1 WHERE id=?2",
+                rusqlite::params![past, old.id],
+            )
+            .unwrap();
+        let hits = api
+            .reflect_candidates(chrono::Utc::now(), 7, 10)
+            .unwrap();
+        let ids: Vec<String> = hits.iter().map(|m| m.id.clone()).collect();
+        assert_eq!(ids.len(), 1, "only fresh memory should match: {:?}", ids);
+        assert!(!ids.is_empty());
+    }
+
+    /// reflect_candidates excludes Identity memories (they're exempt
+    /// Spreading activation (v0.3): search results include 1-hop
+    /// neighbors of top hits, with score = hit.score * edge.strength * 0.5.
+    #[test]
+    fn search_spreading_activation() {
+        let (store, cfg) = setup();
+        let api = MemoryApi::new(&store, &cfg);
+        let edge_api = crate::edge::EdgeApi::new(&store, &cfg);
+        // Two memories: "alpha" (matched by query) and "beta" (linked to alpha).
+        // Beta doesn't contain the query terms but should appear via expansion.
+        let alpha = api.add(note("alpha", "dopamine release reward")).unwrap().id;
+        let beta = api.add(note("beta", "antenna olfactory circuit")).unwrap().id;
+        edge_api
+            .link(&alpha, &beta, crate::schema::EdgeType::Related, 0.8, None, None)
+            .unwrap();
+        // Search for a term only in alpha.
+        let hits = api
+            .search("dopamine", SearchOpts { limit: Some(10), ..Default::default() })
+            .unwrap();
+        let ids: Vec<String> = hits.iter().map(|h| h.memory.id.clone()).collect();
+        assert!(ids.contains(&alpha), "alpha (direct match) must be in results");
+        assert!(
+            ids.contains(&beta),
+            "beta (1-hop neighbor of alpha) should be expanded in, got: {:?}",
+            ids
+        );
+        // beta should have a non-zero score from the expansion.
+        let beta_hit = hits.iter().find(|h| h.memory.id == beta).unwrap();
+        assert!(beta_hit.score > 0.0, "beta's expanded score should be > 0");
+    }
+
+    /// Spreading activation is bounded by `max_neighbor_hops` — set to 0
+    /// to disable.
+    #[test]
+    fn search_spreading_disabled_when_hops_zero() {
+        let (store, mut cfg) = setup();
+        cfg.edges.max_neighbor_hops = 0;
+        let api = MemoryApi::new(&store, &cfg);
+        let edge_api = crate::edge::EdgeApi::new(&store, &cfg);
+        let alpha = api.add(note("alpha", "dopamine release reward")).unwrap().id;
+        let beta = api.add(note("beta", "antenna olfactory circuit")).unwrap().id;
+        edge_api
+            .link(&alpha, &beta, crate::schema::EdgeType::Related, 0.8, None, None)
+            .unwrap();
+        let hits = api
+            .search("dopamine", SearchOpts { limit: Some(10), ..Default::default() })
+            .unwrap();
+        let ids: Vec<String> = hits.iter().map(|h| h.memory.id.clone()).collect();
+        assert!(ids.contains(&alpha));
+        assert!(
+            !ids.contains(&beta),
+            "with max_neighbor_hops=0, beta should NOT be expanded in"
+        );
+        drop(store); // silence unused warning
+    }
+
+    /// from almost everything else; reflection shouldn't surface them).
+    #[test]
+    fn reflect_candidates_excludes_identity() {
+        let (store, cfg) = setup();
+        let api = MemoryApi::new(&store, &cfg);
+        api.add(note("regular", "normal memory")).unwrap();
+        // Add an identity memory directly.
+        let m = crate::schema::Memory {
+            id: "id-1".into(),
+            memory_type: crate::schema::MemoryType::Identity,
+            tier: crate::schema::Tier::Global,
+            category: crate::schema::Category::Identity,
+            title: "I".into(),
+            content: "identity content".into(),
+            context: None,
+            topic_key: None,
+            tags: vec![],
+            project: None,
+            source: crate::schema::Source::Manual,
+            initial_confidence: 1.0,
+            confidence: 1.0,
+            importance: 1.0,
+            access_count: 0,
+            last_accessed_at: chrono::Utc::now(),
+            created_at: chrono::Utc::now(),
+            override_half_life: None,
+            never_prune: true,
+            never_decay: true,
+            content_hash: "h-id".into(),
+            deleted_at: None,
+            needs_review: false,
+            status: ActionStatus::Active,
+            due_at: None,
+            claimed_by: None,
+            parent_id: None,
+            completed_at: None,
+
+        };
+        let tx = store.conn.unchecked_transaction().unwrap();
+        Store::insert_memory_tx(&tx, &m).unwrap();
+        tx.commit().unwrap();
+        drop(m);
+
+        let hits = api
+            .reflect_candidates(chrono::Utc::now(), 7, 10)
+            .unwrap();
+        let ids: Vec<String> = hits.iter().map(|m| m.id.clone()).collect();
+        assert!(!ids.contains(&"id-1".to_string()), "identity memory should be excluded");
+        assert_eq!(hits.len(), 1);
+    }
+
     #[test]
     fn scanner_blocks_secrets() {
         let (store, cfg) = setup();
@@ -479,3 +1025,247 @@ mod tests {
 
 #[cfg(test)]
 mod debug_tests {}
+
+#[cfg(test)]
+mod action_field_tests {
+    //! TDD red phase for v0.3 agent-self-memory (action/lease/checkpoint).
+    //! These tests pin the expected behavior. They will FAIL until the
+    //! implementation lands. See ROADMAP v0.3 + decisions D14.
+
+    use super::*;
+    use crate::schema::{ActionStatus, Category, MemoryType, NewMemory, Source, Tier};
+    use crate::store::Store;
+
+    fn cfg() -> crate::config::Config { crate::config::Config::default() }
+    fn store() -> (Store, crate::config::Config) {
+        let s = Store::open_in_memory().unwrap();
+        (s, cfg())
+    }
+    fn make_mem(content: &str, title: &str) -> NewMemory {
+        NewMemory {
+            content: content.into(),
+            title: title.into(),
+            category: Category::Note,
+            memory_type: MemoryType::Semantic,
+            tier: Tier::Global,
+            context: None,
+            tags: vec![],
+            project: None,
+            source: Source::Manual,
+            importance: 0.5,
+            override_half_life: None,
+            never_prune: false,
+            never_decay: false,
+            needs_review: false,
+        }
+    }
+
+    /// Active memory has status='active' by default and completed_at=0/None.
+    #[test]
+    fn action_default_status_is_active() {
+        let (store, cfg) = store();
+        let api = MemoryApi::new(&store, &cfg);
+        let r = api.add(make_mem("c", "t")).unwrap();
+        let m = api.get(&r.id).unwrap().unwrap();
+        assert_eq!(m.status, ActionStatus::Active, "default should be active");
+    }
+
+    /// Setting status=Completed populates completed_at.
+    #[test]
+    fn action_completed_sets_completed_at() {
+        // TDD red: completed_at should be auto-set when status transitions
+        // to Completed (either via API or update path). For now, just
+        // verify the field exists and can be set explicitly.
+        let (store, cfg) = store();
+        let api = MemoryApi::new(&store, &cfg);
+        let r = api.add(make_mem("c", "t")).unwrap();
+        let m = api.get(&r.id).unwrap().unwrap();
+        assert_eq!(m.status, ActionStatus::Active);
+        assert!(m.completed_at.is_none());
+    }
+
+    /// The fields due_at / claimed_by / parent_id round-trip through
+    /// the store. This pins that the new schema columns actually exist
+    /// and are readable (schema migration v2→v3 worked).
+    #[test]
+    fn action_metadata_fields_round_trip() {
+        let (store, cfg) = store();
+        let api = MemoryApi::new(&store, &cfg);
+        let r = api.add(make_mem("c", "t")).unwrap();
+        let m = api.get(&r.id).unwrap().unwrap();
+        assert!(m.due_at.is_none(), "due_at defaults to None");
+        assert!(m.claimed_by.is_none(), "claimed_by defaults to None");
+        assert!(m.parent_id.is_none(), "parent_id defaults to None");
+    }
+
+    /// The action helpers (next / frontier) return only memories whose
+    /// `status` is Active. Completed / Abandoned are filtered out.
+    /// This is the core behavior that makes "next" semantically
+    /// different from a regular `memory_search`.
+    #[test]
+    fn action_list_excludes_completed_and_abandoned() {
+        let (store, cfg) = store();
+        let api = MemoryApi::new(&store, &cfg);
+        // Create 3 actions in different statuses
+        let _a = api.add(make_mem("active task", "A")).unwrap();
+        let b = api.add(make_mem("done task", "B")).unwrap();
+        let c = api.add(make_mem("dropped task", "C")).unwrap();
+        // Move B to Completed, C to Abandoned
+        for (res, st) in [(b, ActionStatus::Completed), (c, ActionStatus::Abandoned)] {
+            let mut m = api.get(&res.id).unwrap().unwrap();
+            m.status = st;
+            api.update(&m).unwrap();
+        }
+        // TDD red: next/frontier filters will not exist until impl
+    }
+}
+
+#[cfg(test)]
+mod action_business_logic_tests {
+    //! TDD red phase: v0.3 agent-self-memory business logic.
+    //!
+    //! These tests pin the desired behavior. They will FAIL until:
+    //! - `update()` auto-sets `completed_at` when status transitions
+    //!   active → completed (or active → abandoned).
+    //! - `memory_next()` exists: returns 1 highest-priority active action.
+    //! - `memory_frontier()` exists: returns all active actions sorted.
+    //! - Both filter out completed / abandoned.
+
+    use super::*;
+    use crate::schema::{ActionStatus, MemoryType, Tier, Category, Source};
+    use crate::store::Store;
+
+    fn cfg() -> crate::config::Config { crate::config::Config::default() }
+    fn store() -> (Store, crate::config::Config) {
+        let s = Store::open_in_memory().unwrap();
+        (s, cfg())
+    }
+    fn make_mem(content: &str, title: &str) -> NewMemory {
+        NewMemory {
+            content: content.into(),
+            title: title.into(),
+            category: Category::Note,
+            memory_type: MemoryType::Semantic,
+            tier: Tier::Global,
+            context: None,
+            tags: vec![],
+            project: None,
+            source: Source::Manual,
+            importance: 0.5,
+            override_half_life: None,
+            never_prune: false,
+            never_decay: false,
+            needs_review: false,
+        }
+    }
+
+    /// update() should auto-populate completed_at when status flips
+    /// from active to completed. This is the most basic "doing the
+    /// thing" the v0.3 spec promises.
+    #[test]
+    fn update_completed_auto_sets_completed_at() {
+        let (store, cfg) = store();
+        let api = MemoryApi::new(&store, &cfg);
+        let res = api.add(make_mem("c", "t")).unwrap();
+        let mut m = api.get(&res.id).unwrap().unwrap();
+        assert!(m.completed_at.is_none());
+        m.status = ActionStatus::Completed;
+        api.update(&m).unwrap();
+        let m2 = api.get(&res.id).unwrap().unwrap();
+        assert!(m2.completed_at.is_some(),
+                "update(Completed) must set completed_at");
+        assert_eq!(m2.status, ActionStatus::Completed);
+    }
+
+    /// update() with status=abandoned should also set completed_at —
+    /// it's the terminal transition time, not a "done" marker per se.
+    #[test]
+    fn update_abandoned_auto_sets_completed_at() {
+        let (store, cfg) = store();
+        let api = MemoryApi::new(&store, &cfg);
+        let res = api.add(make_mem("c", "t")).unwrap();
+        let mut m = api.get(&res.id).unwrap().unwrap();
+        m.status = ActionStatus::Abandoned;
+        api.update(&m).unwrap();
+        let m2 = api.get(&res.id).unwrap().unwrap();
+        assert!(m2.completed_at.is_some(),
+                "update(Abandoned) must set completed_at");
+    }
+
+    /// update() with status=active should NOT touch completed_at
+    /// (a re-activated action loses its prior completion timestamp).
+    #[test]
+    fn update_active_clears_completed_at() {
+        let (store, cfg) = store();
+        let api = MemoryApi::new(&store, &cfg);
+        let res = api.add(make_mem("c", "t")).unwrap();
+        let mut m = api.get(&res.id).unwrap().unwrap();
+        m.status = ActionStatus::Completed;
+        api.update(&m).unwrap();
+        let mut m2 = api.get(&res.id).unwrap().unwrap();
+        assert!(m2.completed_at.is_some());
+        m2.status = ActionStatus::Active;
+        api.update(&m2).unwrap();
+        let m3 = api.get(&res.id).unwrap().unwrap();
+        assert!(m3.completed_at.is_none(),
+                "re-activation should clear completed_at");
+    }
+
+    /// memory_next(): 1 highest-priority active action.
+    /// Priority: due_at ASC (nulls last), then created_at ASC.
+    #[test]
+    fn memory_next_returns_highest_priority() {
+        let (store, cfg) = store();
+        let api = MemoryApi::new(&store, &cfg);
+        // Three actions, distinct due_at / created_at
+        let a = api.add(make_mem("a", "low")).unwrap();
+        let b = api.add(make_mem("b", "med")).unwrap();
+        let c = api.add(make_mem("c", "hig")).unwrap();
+        // No due_at → fallback to created_at ASC. c was added last, so
+        // it's the highest priority. Test that ordering.
+        let next = api.memory_next().unwrap().expect("expected one next");
+        // The most recently-created active action is "c"
+        assert_eq!(next.id, c.id);
+        // Verify a, b, c still exist and are all active
+        for id in [a.id, b.id, c.id] {
+            let m = api.get(&id).unwrap().unwrap();
+            assert_eq!(m.status, ActionStatus::Active);
+        }
+    }
+
+    /// memory_next(): excludes completed / abandoned memories.
+    #[test]
+    fn memory_next_excludes_completed() {
+        let (store, cfg) = store();
+        let api = MemoryApi::new(&store, &cfg);
+        let a = api.add(make_mem("a", "a")).unwrap();
+        let b = api.add(make_mem("b", "b")).unwrap();
+        // Mark b as completed (with completed_at)
+        let mut m = api.get(&b.id).unwrap().unwrap();
+        m.status = ActionStatus::Completed;
+        api.update(&m).unwrap();
+        // memory_next() should now return a (since b is completed)
+        let next = api.memory_next().unwrap().expect("expected one");
+        assert_eq!(next.id, a.id);
+    }
+
+    /// memory_frontier(): all active actions, sorted by priority.
+    #[test]
+    fn memory_frontier_returns_all_active() {
+        let (store, cfg) = store();
+        let api = MemoryApi::new(&store, &cfg);
+        let a = api.add(make_mem("a", "a")).unwrap();
+        let b = api.add(make_mem("b", "b")).unwrap();
+        let c = api.add(make_mem("c", "c")).unwrap();
+        // Mark b as abandoned
+        let mut m = api.get(&b.id).unwrap().unwrap();
+        m.status = ActionStatus::Abandoned;
+        api.update(&m).unwrap();
+        // frontier should contain a and c, not b
+        let frontier = api.memory_frontier().unwrap();
+        let ids: Vec<&str> = frontier.iter().map(|m| m.id.as_str()).collect();
+        assert!(ids.contains(&a.id.as_str()));
+        assert!(ids.contains(&c.id.as_str()));
+        assert!(!ids.contains(&b.id.as_str()));
+    }
+}

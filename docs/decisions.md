@@ -93,6 +93,39 @@ This file captures the why behind non-obvious choices. For broader context, see 
 
 **Decision**: 8 features deferred to v0.2+ (periodic LLM review, spreading activation, schema migrations, multi-project, backup, web viewer, etc.).
 
-**Why**: v0.1 had to be a working end-to-end system that a user can install, run, and dogfood. Every deferred feature was one whose absence wouldn't break the core flow. The result is ~4500 lines of working code (Rust + TS) instead of 15K lines of half-finished features.
+**Why**: v0.1 had to be a working end-to-end system that a user can install, run, and dogfood. Every deferred feature was one whose absence wouldn't break the core flow. The result is ~5,100 lines of Rust + ~1,400 lines of TS as of v0.2, instead of an estimated 15K lines of half-finished features.
 
 **Trade-off accepted**: slower to reach feature parity with engram/pi-hermes-memory. Faster to reach a stable MVP.
+
+## D13. Why enum parse failures surface as MnemeError, not rusqlite::Error
+
+**Decision**: When `row_to_memory` reads a memory row whose `tier` / `category` / `source` / `memory_type` value doesn't parse to a known enum variant, the error surfaces as `MnemeError::Invalid("unknown Tier: 'active'")` and **not** the generic rusqlite wrapper `Conversion error from type Text at index: 0`.
+
+**Why**: The original `impl From<MnemeError> for rusqlite::Error` produced `FromSqlConversionFailure(0, Type::Text, Box::new(e))`. The Display impl for that variant prints "Conversion error from type Text at index: 0" first and **only reveals the real MnemeError if you walk the source chain**. A user hit this in 2026-07: their DB had 17 rows with `tier='active'` (a value not in the v0.2 enum), and the cryptic wrapper made the failure mode impossible to debug.
+
+**How**: The new `From` impl uses `rusqlite::Error::ToSqlConversionFailure(Box::new(e))`, whose Display shows the inner error directly. Same mechanism (so closures with `?` keep working), but the user-facing message now reads `storage error: invalid input: unknown Tier: 'active'` instead of the misleading wrapper.
+
+**Cost**: zero — closures still propagate via `?` and the underlying MnemeError is preserved for tests / debugging.
+
+**Migration**: the bug surfaced in the wild (17 user rows with tier='active'). Fixed in place with `UPDATE memory SET tier='global' WHERE tier='active'`; a `mneme migrate` CLI is a future addition (see v0.4 roadmap).
+
+**Forward-compat note**: this fixes the *display* of unknown enum values but does NOT auto-accept them. A user upgrading to a future mneme with new categories still needs to be aware that any older rows may fail to read until migrated. If we ever want to silently absorb forward-incompatible values, this is the place to revisit.
+
+## D14. Why agent self-memory is a status column on `memory`, not a separate table
+
+**Context**: v0.3 gives the agent the ability to track its own outstanding work — commitments with a deadline, owner, and lifecycle (active → completed / abandoned). The question was: separate `task` table, or a column on `memory`?
+
+**Decision**: a `status` column (plus `due_at`, `claimed_by`, `parent_id`, `completed_at`) on the existing `memory` table. Schema v3.
+
+**Why**:
+- A commitment is *fundamentally* a memory — it has a title, content, importance, confidence, and should decay/search like any other. A separate table would duplicate the entire memory pipeline (FTS5, decay, pruning, edges) for one extra field.
+- Graph benefits: commitments link to the memories they're about via ordinary edges (`supports`), so `memory_next` can surface the task and `memory_neighbors` can show what it depends on.
+- `memory_next` / `memory_frontier` filter `category != 'identity'` — identity files (USER/PERSONA/CONSTITUTION) are not actions and must never surface as commitments.
+
+**Lifecycle ownership**: `MemoryApi::update()` owns `completed_at` — callers mutate `status`, the server sets/clears `completed_at` on terminal transitions. Callers never set it directly; the response is always re-fetched so the caller sees post-write state (a stale-response bug was fixed in 2026-08).
+
+**Priority order** for `memory_next`: `due_at ASC` (nulls last — deadlines win), then `created_at DESC` (newest for no-deadline case), then `id DESC` (stable tie-break since SQLite timestamps can collide within a second).
+
+**Cost**: three migration arms in `store.rs::migrate`; the v0.2→v0.3 arm adds the five columns. Half-migrated DBs (schema_version stale relative to actual columns) are handled idempotently via `pragma_table_info` checks before each `ADD COLUMN`.
+
+**Alternatives rejected**: separate `task` table (duplicates the memory pipeline), JSON blob on `memory` (not queryable, no indexing).

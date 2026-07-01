@@ -14,7 +14,9 @@
 
 ## Status
 
-**v0.1.0 (alpha)** — core data model, storage, basic ops, MCP server, CLI, Pi + OpenCode adapters. Heuristic auto-capture wired in v0.1; periodic LLM review planned v0.2.
+**v0.3.0 (2026-08-05)** — graph intelligence + agent self-memory.
+
+Agent self-memory: the agent tracks its own commitments (`memory_next` / `memory_frontier` / `memory_action_create` / `memory_action_update`; status active/completed/abandoned, due_at, claimed_by, completed_at auto-managed). Graph analytics: `mneme graph pagerank` / `communities` / `export -f dot|json`. Self-eval observability: `mneme eval stats|dump|prune` with a bounded NDJSON log written by both Pi and OpenCode. 104 Rust + 31 OpenCode + 36 client + 26 hook tests as of HEAD.
 
 See [ROADMAP.md](ROADMAP.md) for what's done and what's next.
 
@@ -36,6 +38,14 @@ mneme add "use jose not jsonwebtoken" --category decision --importance 0.9
 mneme search "jose"
 mneme list
 mneme stats
+
+# v0.3: graph analytics
+mneme graph pagerank -n 10        # hub detection
+mneme graph communities           # community detection
+mneme graph export -f dot -o graph.dot   # Graphviz
+
+# v0.3: what am I committed to? (agent-facing; also via MCP tools)
+mneme eval stats                  # self-eval log summary
 ```
 
 ### For Pi
@@ -115,10 +125,10 @@ weight_importance = 0.2
 mneme/
 ├── crates/mneme/        # Rust core (lib + 2 binaries: mneme CLI, mneme-mcp server)
 ├── packages/
-│   ├── mneme-client/    # Shared TS client (spawns mneme-mcp, JSON-RPC)
-│   ├── mneme-pi/        # Pi extension (4 hooks + 3 tools)
-│   └── mneme-opencode/  # OpenCode plugin (lazy connect + 3 tools)
-├── docs/                # ARCHITECTURE, ROADMAP, config example, identity templates
+│   ├── mneme-client/    # Shared TS client (spawns mneme-mcp, JSON-RPC, isMnemeTool)
+│   ├── mneme-pi/        # Pi extension (4 hooks + 15 tools + self-eval logging)
+│   └── mneme-opencode/  # OpenCode plugin (lazy connect + 16 tools + self-eval logging)
+├── docs/                # ARCHITECTURE, ROADMAP, decisions (D1–D14), config example
 └── scripts/             # install.sh
 ```
 

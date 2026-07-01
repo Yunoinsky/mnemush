@@ -1,90 +1,113 @@
 # Changelog
 
-## Unreleased
-
-### Fixed
-
-- **`memory_add` mcp tool failed with `storage error: constraint failed`** when the user DB had FTS5 rowids that drifted away from the memory table's rowids (orphans from partial cleanup of the memory table or external SQL writes). The old code reused `memory.rowid` from `last_insert_rowid()` as the FTS5 rowid, so any orphan FTS5 row collided with the next insert. Now `insert_memory_tx` omits `rowid` from the FTS5 INSERT and lets FTS5 auto-assign — the two tables are now decoupled. `update_memory_tx` no longer touches FTS5 either: its only v0.1 caller (`search` access-boost) only mutates `confidence` / `last_accessed_at` / `access_count`, none of which FTS5 indexes.
-
-- **Heuristic auto-capture was wired to a non-existent pi event.** mneme-pi registered a `user_prompt_submit` listener, but pi's runtime does not emit that event — the closest matches are `message_start` (carries the message object) and `before_agent_start` (carries `event.prompt` directly). Result: v0.1.0 shipped with a hook that never fired, so the heuristic-capture story was non-functional even for English keywords. Switched to `before_agent_start` and reading `event.prompt`. (mneme-opencode's `chat.message` listener is unaffected — that's a different platform with its own event names; left for the OpenCode plugin owner to verify.)
-
-- **Silent fallback on unknown enum values when loading rows.** The `parse_*` helpers in `store.rs` (used by `row_to_memory` for the `memory_type` / `tier` / `category` / `source` columns) used to coerce unknown strings to the first enum variant (e.g. `category="decizion"` would silently become `Category::Note`). The `parse_enum!` macro now returns `Result`, `row_to_memory` propagates the error via `From<MnemeError> for rusqlite::Error`, and bogus rows fail to load with `MnemeError::Invalid("unknown Category: 'decizion'")`. New test `unknown_category_errors_instead_of_silent_fallback` locks the behavior. The same pattern in `bin/cli.rs::Add` (`Category::parse(&category).unwrap_or(Category::Note)`) is still present on the write path and is left as a follow-up.
-
-- **Heuristic capture silently failed for Chinese keywords.** `looksLikeRemember` and `looksLikeCorrection` in `mneme-client` used `\b...\b` boundaries, but JavaScript's `\b` only matches between ASCII word characters — every CJK keyword (`记住`, `备忘`, `不要`, `错了`, ...) silently failed because Chinese characters are not `\w`. After this fix: substring match (no `\b`), keyword lists expanded to 10 entries each (added 记得 / 重要 / note that / key point for remember; 应该是 / 改用 / never use / use X not Y for correction), and a 36-case test file (mneme-client/test/regex.test.ts) locks the behavior. The same fix unlocks true auto-capture for Chinese users.
+## v0.3.0 (2026-08-05)
 
 ### Added
 
-- **TS unit tests** for `mneme-client` (zero-deps: Node's built-in `--test` + `--experimental-strip-types`). Run via `npm test` at the package or workspace root; runs in CI alongside the Rust tests.
+**Graph analytics over the memory network (`mneme graph`).** Completes the v0.3 graph-intelligence work.
 
-### Removed (dead code)
+- `mneme graph pagerank [-n N]` — PageRank hub detection. Nodes with more incoming/weighted links score higher; prints ranks descending. Standard damping 0.85, dangling-node mass redistribution.
+- `mneme graph communities [--min-members N]` — community detection via label propagation. Deterministic (ties broken by smallest label).
+- `mneme graph export -f dot|json [-o FILE] [--ranks] [--communities]` — Graphviz DOT or D3-force JSON export, optionally annotated with PageRank (dot: label suffix) and/or community (dot: color; json: group).
 
-- `MnemeError::Constitutional` variant — never constructed.
-- `Store::insert_edge_tx` and `Store::row_to_edge` — never called (edges are written via inline SQL in `EdgeApi`).
-- `Store::parse_edge_type` (and `EdgeType` import in `store.rs`) — only used by the deleted `row_to_edge`.
-- mneme-pi `memory` tool's `replace` and `remove` actions — both always returned an error suggesting the same workaround. Use `memory_get` to fetch, then add a new memory with `category=correction` and link with `edge_type=supersedes`.
-- mneme-pi `memory_search` tool — a thin wrapper around `memory action=search`. Search filters (`category`, `project`, `limit`) moved to `memory action=search`, so the wrapper was redundant.
-- mneme-opencode's `formatSearchHit as formatHit` rename — pointless alias; also dropped the unused `formatMemory` import.
+New `crates/mneme/src/graph.rs` module: in-memory graph load, PageRank, label propagation, DOT/JSON serializers. 4 unit tests (hub-outranks-leaf, two-communities, DOT shape, D3 JSON shape).
 
-### Refactored
+### Fixed
 
-- Secret/PII patterns moved from `memory.rs` into a new `scanner` module. The TODO comment about a future `scanner.rs` file is gone because the file now exists.
-- Five `parse_*` functions in `store.rs` consolidated behind a `parse_enum!` macro. All enum variants must be listed in the macro; missing entries now surface as test failures (e.g. forgetting `Tier::Global` immediately breaks `round_trip_memory_row`).
-- `Store::migrate()` simplified — the v1→v2 no-op arm is gone. New DBs get `INSERT INTO schema_version`; future binaries still refuse newer schemas.
+**Tool allowlists in the Pi extension rotted (3 places).** The insight-nudge counter missed OpenCode's v0.3 tools; the self-eval logger duplicated `memory_save_search_result`; the tool-failure capturer only skipped `mneme-`-prefixed names so Pi's unprefixed `memory*` tools leaked "tool failure" memories. Worse, the OpenCode names used underscores (`mneme-memory_search`) while OpenCode registers hyphens (`mneme-memory-search`) — none matched. Fixed with a single `isMnemeTool()` prefix-match helper (shared via mneme-client) used by all three hooks. Regression test added.
 
-## v0.1.0 (2026-06-30) — initial release
+**OpenCode plugin never wrote self-eval logs**, so `mneme eval stats` only covered Pi sessions. Instrumented the tool-registration chokepoint (`registerTool` wraps every execute) so all 16 tools — including the 3 with hand-written try/catch that bypassed `tryRun` — now write `~/.mneme/eval/<session>.ndjson`. 3 new tests.
 
-First end-to-end working version of mneme.
+**CLI `mneme get`/`mneme list` didn't show v0.3 lifecycle fields** (status, due_at, completed_at, claimed_by, parent_id). Added.
 
-### Highlights
+**`call_memory_link` used `unwrap()` after `is_none()` checks** (panic risk on malformed input). Rewrote with let-else destructuring.
 
-- **Rust core** (`crates/mneme`, ~1800 lines) with single-binary
-  distribution (~5–12 MB). 27 unit tests pass.
-- **MCP server** (`mneme-mcp`) over JSON-RPC 2.0 stdio. 5 tools:
-  `memory_add`, `memory_search`, `memory_get`, `memory_link`,
-  `memory_neighbors`.
-- **CLI** (`mneme`) with `search`, `add`, `get`, `list`, `delete`,
-  `stats`, `identity`, `config`, `init` subcommands. End-to-end
-  smoke test (`scripts/test-mcp.py`) validates the full MCP flow.
-- **TS client** (`packages/mneme-client`) spawns `mneme-mcp` and
-  speaks JSON-RPC. Shared by both agent adapters.
-- **Pi extension** (`packages/mneme-pi`) with 4 hooks (session_start,
-  session_end, user_prompt_submit, after_tool_call) and 3 tools
-  (`memory`, `memory_search`, `memory_link`). Heuristic auto-capture
-  of remember/correction patterns and tool failures.
-- **OpenCode plugin** (`packages/mneme-opencode`) with lazy-connect
-  and 3 tools.
-- **Config system** with 5-layer override (defaults / global /
-  project / env / per-memory), env-var fallbacks, validation.
-- **Identity layer** — USER.md, PERSONA.md, CONSTITUTION.md loaded
-  from `~/.mneme/identity/` and rendered as a system-prompt block.
-- **Ebbinghaus-style forgetting** with importance-modulated half-life,
-  access-count boost, active pruning thresholds, Identity exempt.
-- **Graph LTM** with 4 edge types (related, supports, contradicts,
-  supersedes), BFS neighbor query (recursive CTE), auto-link on
-  add (topic match + supersede detection), idempotent link
-  (max-strength on duplicate).
-- **Secret scanner** blocks known credential patterns at write time.
+### Removed
 
-### Installation
+- `evalArgsCache` / `setLastArgs` in mneme-pi (write-only, never read)
+- `ForgettingConfig::importance_default` (defined, never consumed)
 
-```bash
-./scripts/install.sh   # builds, copies to ~/.cargo/bin, inits ~/.mneme
-```
+### Changed
 
-### Test status
+- CLI `eval stats`/`eval dump` now use `eval::eval_dir()` (single source of truth for MNEME_DATA_DIR).
+- Eval-log mtime fallback: unreadable mtime is treated as "now" instead of epoch (over-keep beats nuking live data).
 
-- 28/28 unit tests pass (`cargo test --manifest-path crates/mneme/Cargo.toml`)
-- MCP smoke test passes (`python3 scripts/test-mcp.py`)
-- TypeScript builds clean (`npx tsc` in each package)
-- CLI end-to-end: add / list / search / stats all functional
+### Fixed
 
-### Known limitations (v0.1)
+**MCP input validation now rejects out-of-range and unknown enum values.**
 
-- MCP only exposes add/search/get/link/neighbors; replace/remove not
-  yet wired through MCP (tool returns a clear error suggesting the
-  workaround).
-- No periodic LLM review yet — planned for v0.2.
-- No spreading activation over graph yet — planned for v0.3.
-- No multi-project scope filter yet (memories are global only).
-- No migration system for upgrading existing v0.1 dbs to future
-  versions; the schema_version field is wired but unused.
+`call_memory_add` and `call_memory_save_search_result` previously accepted `importance > 1` or `importance < 0` (and NaN), letting callers poison the decay formula. Now both reject out-of-range values with a clear `importance must be in [0.0, 1.0] (got X)` error. `call_memory_link` gets the same `strength` check. Helper `range_error(field, value, min, max)` in `bin/mcp.rs` is the single source of truth.
+
+`call_memory_link` previously silently coerced unknown `edge_type` strings to `Related`. Now rejects them: `unknown edge_type: "foo" (must be one of related, supports, contradicts, supersedes)`. `call_memory_add` similarly rejects unknown `category` and `memory_type`. The argument "we don't want to lose data silently" was already the policy in v0.1 (test `unknown_category_errors_instead_of_silent_fallback`), but the implementation still wrote Note/Semantic. Now the implementation matches the policy.
+
+`call_memory_link` previously leaked raw SQLite errors when the source or target didn't exist (`storage error: FOREIGN KEY constraint failed`). Now inserts pre-flight `SELECT 1 FROM memory` checks for both ids; missing returns `memory not found: <id>`.
+
+`call_identity_approve` / `call_identity_reject` previously returned `null` for already-resolved proposals, leaving the caller unable to distinguish "not found" from "already resolved". New `mneme::identity::find_proposal(dir, id)` helper finds any-status proposal; the MCP layer translates `Ok(None)` into one of three messages: `proposal not found: <id>`, `proposal already approved`, `proposal already rejected`.
+
+### Added
+
+**`memory_neighbors` pi tool.** Was referenced in `memory_reflect`'s description ("call memory_neighbors to inspect") but not actually registered, forcing any caller to reach the graph out-of-process. Now: 10 pi tools (was 9). 1-tier BFS by default (`max_hops=2`), matching the spreading-activation config.
+
+### Changed
+
+**`memory` pi tool description corrected.** Said "add / search / replace / remove" but only `add` and `search` were implemented. Updated to "add or search" so the LLM doesn't expect `remove` and discover the gap at runtime.
+
+**`after_tool_call` skip list now matches Pi tool names (not just OpenCode).** The 6/14-tool-call nudge counter previously skipped only OpenCode-style names (`mneme-memory`, `mneme-memory_search`, ...). In a pi session tool names have no `mneme-` prefix, so calling our own `memory` or `memory_get` would still increment the counter and surface the nudge — wasted reminder. Skip list now matches both prefixes.
+
+**Pi extension file-header tool list.** Updated to enumerate all 10 tools.
+
+13 new unit tests in `bin/mneme-mcp`: `range_error` × 4 (out-of-range, negative, NaN, boundaries); identity × 4 (unknown id, already approved, already rejected, approve-after-reject); unknown-value × 4 (unknown category, unknown memory_type, unknown source_id, unknown target_id); link-test × 1.
+
+Total: 82 unit tests pass (69 lib + 13 bin).
+
+## v0.2.0 — 2026-07-01
+
+v0.2 (auto-maintenance) and v0.3 first cut (graph intelligence) squashed into a single release commit. Headline: mneme now runs without user intervention, the LLM can self-curate via new MCP tools, and search uses 1-hop graph expansion to surface related memories.
+
+_Note: the items below were originally filed under `## Unreleased` in the prior commit, but actually shipped as part of v0.2.0. They have been moved here per `docs/RELEASING.md`. The release itself was not yet published to crates.io at the time of this audit, so the v0.2.0 cut date remains 2026-07-01._
+
+### Fixed
+
+**Enum parse errors surfaced as a misleading `Conversion error from type Text at index: 0` wrapper.** A user's DB had rows with `tier='active'` (not in the v0.2 `Tier` enum). The `impl From<MnemeError> for rusqlite::Error` produced `FromSqlConversionFailure(0, Type::Text, ...)` whose Display buries the real MnemeError. Changed to `ToSqlConversionFailure(Box::new(e))` — Display now shows the actual `unknown Tier: 'active'` (or similar) at the top level. Affected `row_to_memory` closure path (auto-link layer A, reflect candidates, mneme_status, MCP reads). 1 new unit test (`unknown_tier_errors_without_misleading_wrapper`); updated existing test (`unknown_category_errors_instead_of_silent_fallback`) to assert the misleading wrapper is absent. Documented as `D13` in `docs/decisions.md`.
+
+**Active forgetting was declared but never invoked.** `should_prune` and the configured thresholds existed since v0.1 but no code path called them. Now wired through `mneme prune` (and the session_end hook) so the thresholds actually take effect.
+
+**`sanitize_fts_query` joined tokens with a single space**, which FTS5 interprets as a phrase query (all terms in sequence) — meaning any multi-word query found nothing in practice. Changed to `OR` separator so the default semantics are "any term matches". This affected `memory_search` and the auto-link conflict detector, both of which now return more candidates (a feature, not a regression).
+
+**`MNEME_DATA_DIR` env var was honored only by `identity::default_identity_dir` and `forget::prune_*` (via `Store::open`).** `mneme init` and the config's `db_path` ignored it, making `MNEME_DATA_DIR=/tmp/foo mneme init` write to the real `~/.mneme/identity/`. Now `init_dotfiles` and `apply_env_overrides` both honor it. `MNEME_DB_PATH` still wins if set explicitly.
+
+**`identity approve` / `reject` required the full 36-char UUID.** Now any prefix ≥ 4 chars that matches a pending proposal works. `list-pending` output also prints the full `id:` line so users can copy-paste it.
+
+### Added
+
+**Edge decay.** `EdgeConfig.edge_decay_half_life_days` (default 60d) was declared in v0.1 but never applied. New `forget::current_edge_strength` and `decay_all_edges` implement the same Ebbinghaus formula used for memory confidence. Wired into the pi extension's `session_end` hook (default ON; `MNEME_EDGE_DECAY_ON_SESSION_END=off` to skip). Without this pass, the memory graph accumulated noise as edges were never weakened. New CLI: `mneme edge-decay`. 8 new unit tests.
+
+**`process_needs_review` queue handler.** The `needs_review` flag was set by the v0.2 tool-error capture (`after_tool_call`) but never cleared. New `forget::process_needs_review(store, grace)` clears the flag on items older than the grace period and downgrades importance by 0.1 per pass on `category=failure` items (so repeated errors fade naturally). Wired into `session_end` (default ON; `MNEME_NEEDS_REVIEW_ON_SESSION_END=off` to skip; `MNEME_NEEDS_REVIEW_GRACE_DAYS=N` to adjust). New CLI: `mneme process-needs-review [--grace-days N]`. 4 new unit tests.
+
+**Identity reflection.** The LLM can propose updates to `USER.md` / `PERSONA.md` / `CONSTITUTION.md` via the `identity_propose` MCP / CLI / pi tool, but updates are never applied silently. Proposals are written to `~/.mneme/identity/pending.jsonl` with id, target, content, reason, evidence_count, and status (`pending` | `approved` | `rejected`). The user reviews via `mneme identity list-pending` and applies with `approve` / `reject`. CLI subcommands: `mneme identity show|list-pending|propose|approve|reject`. MCP tools: `identity_propose`, `identity_list_pending`, `identity_approve`, `identity_reject`. Pi tools: `identity_propose`, `identity_review`. 8 new unit tests.
+
+**`memory_save_search_result` tool.** Explicit (not auto) save of search hits as memories. Takes `ids` (from a prior `memory_search`) and `query` (recorded in context for provenance). Returns `{saved: [...ids], errors: [...]}` so the caller knows which inputs succeeded. Empty `ids` or missing `query` returns a proper -32602 error.
+
+**Insight / eureka mechanism in two layers.** Layer A (algorithmic, on every `memory_add`): `auto_link_tx` step 3 runs a separate FTS5 OR-query against recent content, computes Jaccard similarity, and adds up to 3 low-strength `related` edges for memories in the `[0.05, 0.5)` similarity band. Configurable via new `edges.auto_link_weak_*` fields. Skips pairs already linked. Layer B (LLM-driven, on demand): `MemoryApi::reflect_candidates(now, since_days, limit)` returns recent least-connected memories. CLI: `mneme reflect [--since-days N] [--limit N]`. MCP: `memory_reflect`. Pi: `memory_reflect`. 6 new unit tests.
+
+**`mneme status` subcommand + `mneme_status` MCP tool.** One-line summary of memory system state: active/soft-deleted counts, edge count, needs_review count, prune candidates (using `should_prune`), reflect candidates (last 7d), pending identity proposals.
+
+**Spreading activation on search.** `memory_search` expands each top hit with its 1-hop neighbors, scoring them at `hit.score * edge.strength * 0.5`. Lets the LLM find related memories that didn't match the query text directly. Gated on `edges.max_neighbor_hops`; set to 0 to disable without code changes. 2 new unit tests.
+
+**Periodic insight-save nudge (mneme-pi).** On every 6th and 14th non-mneme tool call in a turn, the pi extension surfaces a `sendStatus` reminder. Counter resets on `before_agent_start`. The existing error-capture handler skips ALL `mneme-*` tools so our own failures aren't recorded as "tool failure" memories.
+
+**4 new config fields in `[edges]`.** `auto_link_weak_min_sim` (0.05), `auto_link_weak_max_sim` (0.5), `auto_link_weak_strength` (0.4), `auto_link_weak_limit` (3). See `docs/config.example.toml`.
+
+### Changed
+
+`docs/identity/PERSONA.md`: appended an agent-centric memory behavior section (preference/decision/correction capture patterns, what NOT to save). Bootstrapped automatically by `identity_propose`+`identity_approve`.
+
+### Test count
+
+56/56 unit tests pass.
+
+### Known limitations (v0.2)
+
+- Orphan FTS5 rows after hard-delete (`--isolate` removes the memory row without rebuilding `memory_fts`; a `mneme vacuum` would be a future addition).
+- `mneme prune --isolate` (hard delete) is never auto-invoked; users opt in manually.
+

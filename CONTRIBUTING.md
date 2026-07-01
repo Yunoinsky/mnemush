@@ -60,6 +60,8 @@ Examples (drawn from real history):
 - `🔧 chore(gitignore): ignore .codegraph/ tooling cache`
 - `🐛 fix(mcp): handle empty result set in memory_search`
 
+> **Canonical reference.** This table is the project's source of truth for commit-message emojis. If you use an LLM agent that injects its own shorter table (e.g. from a global prompt), treat this one as authoritative.
+
 Common emojis (full set at gitmoji.dev):
 
 | Emoji | Use for |
@@ -91,7 +93,7 @@ Common emojis (full set at gitmoji.dev):
 
 ## Release process
 
-See [docs/RELEASING.md](docs/RELEASING.md) (TBD).
+See [docs/RELEASING.md](docs/RELEASING.md).
 
 ## License
 

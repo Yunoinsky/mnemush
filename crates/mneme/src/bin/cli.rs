@@ -14,6 +14,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use mneme::config::Config;
+use mneme::forget::{self, PruneReason};
 use mneme::identity::Identity;
 use mneme::memory::MemoryApi;
 use mneme::schema::{Category, MemoryType, NewMemory, SearchOpts, Source};
@@ -75,14 +76,207 @@ enum Cmd {
     },
     /// Soft-delete a memory.
     Delete { id: String },
+    /// Prune (soft-delete) low-confidence / stale memories.
+    /// Default mode is dry-run: lists candidates without touching the DB.
+    Prune {
+        /// Actually apply (default is dry-run).
+        #[arg(long)]
+        apply: bool,
+        /// Force dry-run mode (no-op for clarity, since dry-run is the
+        /// default; included so users coming from apt-get/curl style
+        /// CLIs can be explicit).
+        #[arg(long)]
+        dry_run: bool,
+        /// Cap the number of memories processed.
+        #[arg(long, short = 'l')]
+        limit: Option<usize>,
+        /// Step 2: hard-delete soft-deleted memories that are also isolated
+        /// (zero inbound edges, low importance, stale).
+        #[arg(long)]
+        isolate: bool,
+        /// Days after soft-delete before hard-delete is allowed (--isolate).
+        #[arg(long, default_value_t = 7)]
+        grace_days: i64,
+        /// Max importance for --isolate candidates (default 0.5).
+        #[arg(long, default_value_t = 0.5)]
+        max_importance: f32,
+        /// Min days since last access for --isolate candidates.
+        #[arg(long, default_value_t = 30)]
+        min_days_no_access: i64,
+    },
     /// Show stats.
     Stats,
-    /// Show identity (USER/PERSONA/CONSTITUTION).
-    Identity,
+    /// One-line summary of memory system state: counts, pending
+    /// identity proposals, reflect candidates. Designed for the LLM
+    /// (and the user) to see at a glance without running separate
+    /// commands.
+    Status,
+    /// Apply Ebbinghaus decay to all active edges (same formula as
+    /// memory confidence decay). Useful as a manual or scheduled
+    /// graph-cleanup pass. Idempotent.
+    EdgeDecay,
+    /// Process the needs_review queue: clear flags on items older
+    /// than the grace period (default 1 day). For failure-category
+    /// items, also downgrade importance by 0.1 per pass.
+    ProcessNeedsReview {
+        /// Grace period before a needs_review item is processed.
+        #[arg(long, default_value = "1")]
+        grace_days: i64,
+    },
+    /// Show or manage identity (USER/PERSONA/CONSTITUTION).
+    /// Use `mneme identity show` to print current files, or the
+    /// subcommands below to manage LLM-proposed updates.
+    Identity {
+        #[command(subcommand)]
+        action: IdentityCmd,
+    },
     /// Config inspection.
     Config,
     /// Initialize ~/.mneme with template files.
     Init,
+    /// Surface recent, under-connected memories for LLM reflection.
+    /// Prints each candidate's id, title, category, importance, and edge
+    /// count. The LLM (or a human) reads these and decides which conceptual
+    /// links the auto-link layer missed.
+    Reflect {
+        /// Only consider memories created in the last N days.
+        #[arg(long, default_value_t = 7)]
+        since_days: i64,
+        /// Max candidates to surface.
+        #[arg(long, short = 'l', default_value_t = 20)]
+        limit: usize,
+    },
+    /// Self-evaluation observability. Read-only inspection of the
+    /// per-session NDJSON log written by agent plugins. Stats
+    /// summarizes call counts, per-tool breakdown, latency
+    /// percentiles, and error rate. Dump emits raw NDJSON to
+    /// stdout for offline analysis. The goal is to ground claims
+    /// about "mneme works well" in real usage data, not vibes.
+    Eval {
+        #[command(subcommand)]
+        action: EvalCmd,
+    },
+    /// Graph analytics over the memory network: PageRank hub
+    /// detection, community discovery (label propagation), and
+    /// DOT / D3-JSON export for visualization.
+    Graph {
+        #[command(subcommand)]
+        action: GraphCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum EvalCmd {
+    /// Summarize the eval log: total calls, per-tool breakdown,
+    /// p50/p95 latency, error rate. Output is human-readable
+    /// for `tail -f` style watching or piping into `less`.
+    Stats {
+        /// Only count events with ts newer than (now - since). Accepts
+        /// the same forms as `mneme reflect --since-days` (e.g. "1d",
+        /// "12h"). Default: 7d.
+        #[arg(long, default_value = "7d")]
+        since: String,
+    },
+    /// Emit the raw NDJSON log (filtered by --since) to stdout,
+    /// one entry per line. For piping into `jq`, `grep`, or
+    /// offline analysis scripts.
+    Dump {
+        #[arg(long, default_value = "7d")]
+        since: String,
+    },
+    /// Apply the eval-log maintenance caps from [eval] in config.toml.
+    /// Three caps, applied in order:
+    ///   1. `max_age_days` (default 30) — drop files older than this.
+    ///   2. `max_entries_per_file` (default 5000) — keep the newest N
+    ///      lines per file (drop oldest).
+    ///   3. `max_session_files` (default 30) — keep the N most-recent
+    ///      session files; delete the rest.
+    /// Dry-run by default; pass `--apply` to actually write. Auto-runs
+    /// at session_end unless MNEME_EVAL_PRUNE_ON_SESSION_END=off.
+    Prune {
+        /// Show what would change without writing.
+        #[arg(long)]
+        apply: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum GraphCmd {
+    /// PageRank hub detection. Prints each memory's rank, highest
+    /// first. Nodes with more/link-weighted incoming connections
+    /// (hubs) score higher — good for "what is the center of this
+    /// memory network?"
+    Pagerank {
+        /// Only print the top N ranked memories (0 = all).
+        #[arg(long, short = 'n', default_value_t = 20)]
+        top: usize,
+    },
+    /// Community detection via label propagation. Prints each
+    /// community (one line per memory, grouped by shared label).
+    /// Densely-linked clusters collapse to a single label; bridges
+    /// don't merge them.
+    Communities {
+        /// Only print communities with at least N members.
+        #[arg(long, default_value_t = 1)]
+        min_members: usize,
+    },
+    /// Export the graph for visualization: `--format dot` (Graphviz
+    /// digraph) or `--format json` (D3-force {nodes, links}). Use
+    /// `--ranks` to annotate nodes with PageRank and `--communities`
+    /// to color/group by community.
+    Export {
+        /// dot | json
+        #[arg(long, short = 'f', default_value = "dot")]
+        format: String,
+        /// Annotate nodes with PageRank (dot: label suffix; json: rank field).
+        #[arg(long)]
+        ranks: bool,
+        /// Color/group nodes by community (dot: color; json: group field).
+        #[arg(long)]
+        communities: bool,
+        /// Write to this file instead of stdout.
+        #[arg(long, short = 'o')]
+        output: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum IdentityCmd {
+    /// Print the current USER.md / PERSONA.md / CONSTITUTION.md contents.
+    Show,
+    /// List pending identity-update proposals. Default filters to
+    /// pending only; pass `--all` to also see approved/rejected history.
+    ListPending {
+        /// Show all proposals regardless of status.
+        #[arg(long)]
+        all: bool,
+        /// Filter by status (pending|approved|rejected).
+        #[arg(long)]
+        status: Option<String>,
+    },
+    /// Propose an update to one of the identity files. The proposal is
+    /// written to pending.jsonl; the user reviews with `list-pending`
+    /// and applies with `approve` or `reject`.
+    Propose {
+        /// Target file: USER.md, PERSONA.md, or CONSTITUTION.md.
+        target: String,
+        /// The content to append (will be wrapped in a dated section).
+        content: String,
+        /// Why this is being proposed (the LLM's reasoning).
+        reason: String,
+        /// Evidence count: how many distinct observations support this.
+        #[arg(long, default_value_t = 1)]
+        evidence: u32,
+    },
+    /// Approve a pending proposal — appends its content to the target file.
+    Approve {
+        /// The proposal id (8-char prefix from `list-pending` is enough).
+        id: String,
+    },
+    /// Reject a pending proposal — marked rejected, target file untouched.
+    Reject {
+        id: String,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -102,7 +296,7 @@ fn main() -> anyhow::Result<()> {
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
-    let store = Store::open(&db_path)?;
+    let mut store = Store::open(&db_path)?;
 
     match cli.cmd {
         Cmd::Search {
@@ -186,12 +380,40 @@ fn main() -> anyhow::Result<()> {
                     m.category.as_str(),
                     &m.id[..8]
                 );
+                if m.status != mneme::schema::ActionStatus::Active {
+                    println!("      status: {}", m.status.as_str());
+                }
+                if let Some(d) = &m.due_at {
+                    println!("      due:    {}", d);
+                }
             }
         }
         Cmd::Delete { id } => {
             let api = MemoryApi::new(&store, &config);
             api.soft_delete(&id)?;
             println!("soft-deleted: {}", id);
+        }
+        Cmd::Prune {
+            apply,
+            dry_run: _,
+            limit,
+            isolate,
+            grace_days,
+            max_importance,
+            min_days_no_access,
+        } => {
+            let now = chrono::Utc::now();
+            if isolate {
+                let opts = mneme::forget::IsolateOpts {
+                    grace_days,
+                    max_importance,
+                    min_days_no_access,
+                    limit,
+                };
+                run_isolate(&mut store, &config, now, apply, opts)?;
+            } else {
+                run_prune(&mut store, &config, now, apply, limit)?;
+            }
         }
         Cmd::Stats => {
             let count: i64 = store.conn.query_row(
@@ -217,23 +439,435 @@ fn main() -> anyhow::Result<()> {
                 println!("  {}: {}", k, v);
             }
         }
-        Cmd::Identity => {
-            let id = Identity::load().unwrap_or_default();
-            if id.is_empty() {
-                println!("(no identity files in ~/.mneme/identity/)");
-                println!("run `mneme init` to bootstrap");
-            } else {
-                println!("{}", id.render_prompt_block());
-            }
+        Cmd::Status => {
+            let active: i64 = store.conn.query_row(
+                "SELECT COUNT(*) FROM memory WHERE deleted_at IS NULL",
+                [],
+                |r| r.get(0),
+            )?;
+            let soft_deleted: i64 = store.conn.query_row(
+                "SELECT COUNT(*) FROM memory WHERE deleted_at IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )?;
+            let edges: i64 = store.conn.query_row(
+                "SELECT COUNT(*) FROM memory_edge WHERE deleted_at IS NULL",
+                [],
+                |r| r.get(0),
+            )?;
+            let needs_review: i64 = store.conn.query_row(
+                "SELECT COUNT(*) FROM memory WHERE needs_review=1 AND deleted_at IS NULL",
+                [],
+                |r| r.get(0),
+            )?;
+            // Use the actual should_prune predicate, not the loose
+            // "importance < 0.7" filter — the latter counts memories
+            // that are still fresh and high-confidence.
+            let now = chrono::Utc::now();
+            let prune_candidates = mneme::forget::prune_dry_run(&store, &config, now, None)
+                .map(|v| v.len() as i64)
+                .unwrap_or(0);
+            let api = MemoryApi::new(&store, &config);
+            let reflect_n = api
+                .reflect_candidates(now, 7, 999)
+                .map(|v| v.len() as i64)
+                .unwrap_or(0);
+            let pending_proposals = mneme::identity::list_pending(Some(
+                mneme::identity::ProposalStatus::Pending,
+            ))
+            .map(|v| v.len() as i64)
+            .unwrap_or(0);
+            println!("mneme status");
+            println!("  memories (active):    {}", active);
+            println!("  memories (soft-del):  {}", soft_deleted);
+            println!("  edges (active):       {}", edges);
+            println!("  needs_review:         {}", needs_review);
+            println!("  prune candidates:     {} (matches should_prune)", prune_candidates);
+            println!("  reflect candidates:   {} (last 7d)", reflect_n);
+            println!("  pending proposals:    {} (run `mneme identity list-pending`)", pending_proposals);
         }
+        Cmd::EdgeDecay => {
+            let config = mneme::config::Config::load()?;
+            let updated = mneme::forget::decay_all_edges(&mut store, &config, chrono::Utc::now())?;
+            println!("edges decayed: {updated}");
+        }
+        Cmd::ProcessNeedsReview { grace_days } => {
+            let grace = chrono::Duration::days(grace_days);
+            let n = mneme::forget::process_needs_review(&mut store, grace)?;
+            println!("needs_review processed: {n}");
+        }
+        Cmd::Identity { action } => match action {
+            IdentityCmd::Show => {
+                let id = Identity::load().unwrap_or_default();
+                if id.is_empty() {
+                    println!("(no identity files in ~/.mneme/identity/)");
+                    println!("run `mneme init` to bootstrap");
+                } else {
+                    println!("{}", id.render_prompt_block());
+                }
+            }
+            IdentityCmd::ListPending { status, all } => {
+                let status_filter = if let Some(s) = status {
+                    Some(match s.as_str() {
+                        "pending" => mneme::identity::ProposalStatus::Pending,
+                        "approved" => mneme::identity::ProposalStatus::Approved,
+                        "rejected" => mneme::identity::ProposalStatus::Rejected,
+                        other => {
+                            println!("unknown status '{}', expected pending|approved|rejected", other);
+                            return Ok(());
+                        }
+                    })
+                } else if all {
+                    None
+                } else {
+                    Some(mneme::identity::ProposalStatus::Pending)
+                };
+                let proposals =
+                    mneme::identity::list_pending(status_filter).unwrap_or_default();
+                if proposals.is_empty() {
+                    println!("(no {}proposals)", if all { "" } else { "pending " });
+                    return Ok(());
+                }
+                println!("{} proposal(s):", proposals.len());
+                for p in &proposals {
+                    let short = if p.id.len() >= 8 { &p.id[..8] } else { &p.id };
+                    println!(
+                        "  - {}  [{}→{}|ev={}]  {}",
+                        short,
+                        format!("{:?}", p.status).to_lowercase(),
+                        p.target,
+                        p.evidence_count,
+                        p.content.chars().take(60).collect::<String>()
+                    );
+                    println!("       id: {}", p.id);
+                    println!("       reason: {}", p.reason);
+                }
+            }
+            IdentityCmd::Propose {
+                target,
+                content,
+                reason,
+                evidence,
+            } => {
+                let p = mneme::identity::propose(&target, &content, &reason, evidence)?;
+                let short = if p.id.len() >= 8 { &p.id[..8] } else { &p.id };
+                println!(
+                    "proposed #{} → {} (run `mneme identity list-pending` to review, then `approve {}` or `reject {}`)",
+                    short, target, short, short
+                );
+            }
+            IdentityCmd::Approve { id } => {
+                match mneme::identity::approve(&id)? {
+                    Some(p) => {
+                        let short = if p.id.len() >= 8 { &p.id[..8] } else { &p.id };
+                        println!("approved #{} → appended to {}", short, p.target);
+                    }
+                    None => println!("(no pending proposal with id {})", &id[..id.len().min(8)]),
+                }
+            }
+            IdentityCmd::Reject { id } => {
+                match mneme::identity::reject(&id)? {
+                    Some(p) => {
+                        let short = if p.id.len() >= 8 { &p.id[..8] } else { &p.id };
+                        println!("rejected #{} (was for {})", short, p.target);
+                    }
+                    None => println!("(no pending proposal with id {})", &id[..id.len().min(8)]),
+                }
+            }
+        },
         Cmd::Config => {
             println!("{:#?}", config);
         }
         Cmd::Init => {
             init_dotfiles()?;
         }
+        Cmd::Reflect { since_days, limit } => {
+            let api = MemoryApi::new(&store, &config);
+            let hits = api.reflect_candidates(chrono::Utc::now(), since_days, limit)?;
+            if hits.is_empty() {
+                println!("(no candidates)");
+                return Ok(());
+            }
+            println!("{} reflection candidate(s):", hits.len());
+            for m in &hits {
+                let edge_count: i64 = store.conn.query_row(
+                    "SELECT COUNT(*) FROM memory_edge \
+                     WHERE (source_id=?1 OR target_id=?1) AND deleted_at IS NULL",
+                    rusqlite::params![m.id],
+                    |r| r.get(0),
+                )?;
+                println!(
+                    "  - {}  [{}|imp={:.2}|edges={}]  {}",
+                    short_id(&m.id),
+                    m.category.as_str(),
+                    m.importance,
+                    edge_count,
+                    m.title,
+                );
+                if !m.content.is_empty() {
+                    println!("       {}", truncate(&m.content, 80));
+                }
+            }
+        }
+        Cmd::Eval { action } => {
+            use std::collections::BTreeMap;
+            match action {
+                EvalCmd::Stats { since } => {
+                    let cutoff = parse_since_seconds(&since);
+                    let eval_dir = mneme::eval::eval_dir();
+                    if !eval_dir.exists() {
+                        println!("(no eval data at {})", eval_dir.display());
+                        println!("Hint: agent plugins (pi, OpenCode) write per-session");
+                        println!("NDJSON to this dir on each tool call. Nothing has been");
+                        println!("captured yet.");
+                        return Ok(());
+                    }
+                    let mut total = 0usize;
+                    let mut errors = 0usize;
+                    let mut by_tool: BTreeMap<String, usize> = BTreeMap::new();
+                    let mut lats: Vec<u64> = Vec::new();
+                    let mut sessions: BTreeMap<String, usize> = BTreeMap::new();
+                    for entry in std::fs::read_dir(&eval_dir)
+                        .map_err(|e| mneme::error::MnemeError::Other(e.to_string()))?
+                    {
+                        let entry = entry.map_err(|e| {
+                            mneme::error::MnemeError::Other(e.to_string())
+                        })?;
+                        let path = entry.path();
+                        if path.extension().and_then(|s| s.to_str()) != Some("ndjson") {
+                            continue;
+                        }
+                        let content = std::fs::read_to_string(&path).map_err(|e| {
+                            mneme::error::MnemeError::Other(e.to_string())
+                        })?;
+                        for line in content.lines() {
+                            let line = line.trim();
+                            if line.is_empty() {
+                                continue;
+                            }
+                            let Ok(e) = serde_json::from_str::<serde_json::Value>(line) else {
+                                continue;
+                            };
+                            if let Some(ts) = e.get("ts").and_then(|v| v.as_i64()) {
+                                if ts < cutoff {
+                                    continue;
+                                }
+                            }
+                            total += 1;
+                            if e.get("error").map(|v| !v.is_null()).unwrap_or(false) {
+                                errors += 1;
+                            }
+                            if let Some(tool) = e.get("tool").and_then(|v| v.as_str()) {
+                                *by_tool.entry(tool.to_string()).or_default() += 1;
+                            }
+                            if let Some(lat) =
+                                e.get("latency_ms").and_then(|v| v.as_u64())
+                            {
+                                lats.push(lat);
+                            }
+                            if let Some(s) = e.get("session").and_then(|v| v.as_str()) {
+                                *sessions.entry(s.to_string()).or_default() += 1;
+                            }
+                        }
+                    }
+                    if total == 0 {
+                        println!("(no eval entries in the last {since})");
+                        return Ok(());
+                    }
+                    println!("self-eval (last {since}): {} total calls across {} session(s)",
+                             total, sessions.len());
+                    println!();
+                    lats.sort_unstable();
+                    let p = |q: f64| -> u64 {
+                        if lats.is_empty() { 0 } else {
+                            let i = ((lats.len() as f64 - 1.0) * q) as usize;
+                            lats[i]
+                        }
+                    };
+                    let p50 = p(0.50);
+                    let p95 = p(0.95);
+                    println!("  latency:    p50={}ms  p95={}ms  (n={})", p50, p95, lats.len());
+                    println!("  errors:     {} / {} = {:.1}%",
+                             errors, total, 100.0 * errors as f64 / total as f64);
+                    println!();
+                    println!("  by tool:");
+                    for (tool, count) in &by_tool {
+                        let pct = 100.0 * *count as f64 / total as f64;
+                        println!("    {:<28} {:>4}  ({:>5.1}%)", tool, count, pct);
+                    }
+                }
+                EvalCmd::Dump { since } => {
+                    let cutoff = parse_since_seconds(&since);
+                    let eval_dir = mneme::eval::eval_dir();
+                    if !eval_dir.exists() {
+                        return Ok(());
+                    }
+                    for entry in std::fs::read_dir(&eval_dir)
+                        .map_err(|e| mneme::error::MnemeError::Other(e.to_string()))?
+                    {
+                        let entry = entry.map_err(|e| {
+                            mneme::error::MnemeError::Other(e.to_string())
+                        })?;
+                        let path = entry.path();
+                        if path.extension().and_then(|s| s.to_str()) != Some("ndjson") {
+                            continue;
+                        }
+                        let content = std::fs::read_to_string(&path).map_err(|e| {
+                            mneme::error::MnemeError::Other(e.to_string())
+                        })?;
+                        for line in content.lines() {
+                            let line = line.trim();
+                            if line.is_empty() {
+                                continue;
+                            }
+                            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+                                continue;
+                            };
+                            if let Some(ts) = v.get("ts").and_then(|v| v.as_i64()) {
+                                if ts < cutoff {
+                                    continue;
+                                }
+                            }
+                            println!("{}", v);
+                        }
+                    }
+                }
+                EvalCmd::Prune { apply } => {
+                    let cfg = mneme::config::Config::load()?;
+                    let r = if apply {
+                        mneme::eval::prune_apply(&cfg.eval)?
+                    } else {
+                        mneme::eval::prune_dry_run(&cfg.eval)?
+                    };
+                    println!(
+                        "{}: {} file(s) kept, {} lines kept; removed by age={}, by count={}, lines dropped={} (≈{} bytes)",
+                        if apply { "pruned" } else { "would prune" },
+                        r.files_kept,
+                        r.lines_kept,
+                        r.files_removed_age,
+                        r.files_removed_count,
+                        r.lines_dropped_count,
+                        r.bytes_recovered_estimated,
+                    );
+                }
+            }
+        }
+        Cmd::Graph { action } => {
+            use mneme::graph;
+            let g = graph::Graph::load(&store)?;
+            match action {
+                GraphCmd::Pagerank { top } => {
+                    let ranks = graph::pagerank(&g, 0.85, 100, 1e-6);
+                    // Sort by rank desc, tie-break by title.
+                    let mut idx: Vec<usize> = (0..g.nodes.len()).collect();
+                    idx.sort_by(|&a, &b| {
+                        ranks[b]
+                            .partial_cmp(&ranks[a])
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                            .then_with(|| g.nodes[a].title.cmp(&g.nodes[b].title))
+                    });
+                    if g.active_count() == 0 {
+                        println!("(graph is empty — add memories and link them first)");
+                        return Ok(());
+                    }
+                    let shown = idx
+                        .iter()
+                        .take(if top == 0 { idx.len() } else { top.min(idx.len()) });
+                    for &i in shown {
+                        let m = &g.nodes[i];
+                        println!("{:>7.4}  #{}  {}", ranks[i], &m.id[..8], m.title);
+                    }
+                }
+                GraphCmd::Communities { min_members } => {
+                    let labels = graph::label_propagation(&g, 50);
+                    // Group by label.
+                    let mut groups: std::collections::BTreeMap<String, Vec<usize>> =
+                        std::collections::BTreeMap::new();
+                    for (i, l) in labels.iter().enumerate() {
+                        groups.entry(l.clone()).or_default().push(i);
+                    }
+                    if g.active_count() == 0 {
+                        println!("(graph is empty — add memories and link them first)");
+                        return Ok(());
+                    }
+                    let mut n = 0usize;
+                    for (label, members) in &groups {
+                        if members.len() < min_members {
+                            continue;
+                        }
+                        n += 1;
+                        println!("community {} ({}, {} member(s)):",
+                            n, &label[..8.min(label.len())], members.len());
+                        for &i in members {
+                            let m = &g.nodes[i];
+                            println!("    #{}  {}", &m.id[..8], m.title);
+                        }
+                    }
+                    if n == 0 {
+                        println!("(no communities with >= {} member(s))", min_members);
+                    }
+                }
+                GraphCmd::Export { format, ranks, communities, output } => {
+                    let edges = graph::load_edges(&store)?;
+                    let ranks_opt = if ranks {
+                        Some(graph::pagerank(&g, 0.85, 100, 1e-6))
+                    } else {
+                        None
+                    };
+                    let com_opt = if communities {
+                        Some(graph::label_propagation(&g, 50))
+                    } else {
+                        None
+                    };
+                    let body = match format.as_str() {
+                        "dot" => graph::export_dot(&g, &edges, ranks_opt.as_deref(), com_opt.as_deref()),
+                        "json" => graph::export_d3(&g, &edges, com_opt.as_deref()),
+                        other => {
+                            println!("unknown format '{}' (expected dot|json)", other);
+                            return Ok(());
+                        }
+                    };
+                    match output {
+                        Some(path) => {
+                            std::fs::write(&path, &body).map_err(|e| {
+                                mneme::error::MnemeError::Other(format!(
+                                    "write {}: {}", path, e
+                                ))
+                            })?;
+                            println!("wrote {} ({} bytes)", path, body.len());
+                        }
+                        None => print!("{}", body),
+                    }
+                }
+            }
+        }
     }
     Ok(())
+}
+
+/// Parse a duration like "1d", "12h", "30m" into a unix-seconds cutoff.
+/// Default to 0 (include everything) for unrecognized forms — the
+/// caller will just see a large window, not silently drop data.
+fn parse_since_seconds(s: &str) -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let split_at = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+    let (num, unit) = s.split_at(split_at);
+    let Ok(n) = num.parse::<i64>() else {
+        return 0;
+    };
+    let secs = match unit {
+        "" | "s" => n,
+        "m" => n * 60,
+        "h" => n * 3600,
+        "d" => n * 86400,
+        "w" => n * 604800,
+        _ => return 0,
+    };
+    now.saturating_sub(secs)
 }
 
 fn print_memory(m: &mneme::schema::Memory) {
@@ -253,6 +887,19 @@ fn print_memory(m: &mneme::schema::Memory) {
     println!("access:      {}", m.access_count);
     println!("created:     {}", m.created_at);
     println!("accessed:    {}", m.last_accessed_at);
+    println!("status:      {}", m.status.as_str());
+    if let Some(d) = &m.due_at {
+        println!("due_at:      {}", d);
+    }
+    if let Some(c) = &m.claimed_by {
+        println!("claimed_by:  {}", c);
+    }
+    if let Some(p) = &m.parent_id {
+        println!("parent_id:   {}", p);
+    }
+    if let Some(c) = &m.completed_at {
+        println!("completed_at:{}", c);
+    }
 }
 
 fn count_by(store: &Store, col: &str) -> anyhow::Result<Vec<(String, i64)>> {
@@ -282,9 +929,135 @@ fn truncate(s: &str, n: usize) -> String {
     out
 }
 
+fn run_prune(
+    store: &mut Store,
+    cfg: &Config,
+    now: chrono::DateTime<chrono::Utc>,
+    apply: bool,
+    limit: Option<usize>,
+) -> anyhow::Result<()> {
+    if apply {
+        let deleted = forget::prune_apply(store, cfg, now, limit)?;
+        if deleted.is_empty() {
+            println!("(no candidates)");
+            return Ok(());
+        }
+        println!("soft-deleted {} memory(ies):", deleted.len());
+        for (id, reason) in deleted {
+            println!("  - {}  [{}]", short_id(&id), reason_label(&reason));
+        }
+    } else {
+        let hits = forget::prune_dry_run(store, cfg, now, limit)?;
+        if hits.is_empty() {
+            println!("(no prune candidates)");
+            return Ok(());
+        }
+        println!("DRY RUN: would soft-delete {} memory(ies):", hits.len());
+        for (m, reason) in hits {
+            println!(
+                "  - {}  [{:>5.2}]  {}  ({})",
+                short_id(&m.id),
+                m.importance,
+                m.title,
+                reason_label(&reason)
+            );
+        }
+        println!("\nrerun with --apply to soft-delete; recover via custom UPDATE setting deleted_at=NULL");
+    }
+    Ok(())
+}
+
+fn run_isolate(
+    store: &mut Store,
+    cfg: &Config,
+    now: chrono::DateTime<chrono::Utc>,
+    apply: bool,
+    opts: mneme::forget::IsolateOpts,
+) -> anyhow::Result<()> {
+    if apply {
+        let deleted = forget::isolate_hard_delete(store, cfg, now, opts)?;
+        if deleted.is_empty() {
+            println!("(no isolated candidates)");
+            return Ok(());
+        }
+        println!("hard-deleted {} memory(ies):", deleted.len());
+        for (id, reason) in deleted {
+            println!("  - {}  [{}]", short_id(&id), reason_label(&reason));
+        }
+    } else {
+        let hits = forget::isolate_dry_run(store, now, opts)?;
+        if hits.is_empty() {
+            println!("(no isolated candidates)");
+            return Ok(());
+        }
+        println!("DRY RUN: would hard-delete {} memory(ies):", hits.len());
+        for m in hits {
+            let days_no_access = (now.timestamp() - m.last_accessed_at.timestamp()) / 86_400;
+            println!(
+                "  - {}  [{:>5.2}]  {}d no access, grace={}d",
+                short_id(&m.id),
+                m.importance,
+                days_no_access,
+                opts.grace_days
+            );
+        }
+        println!("\nrerun with --apply to hard-delete; this is irreversible");
+    }
+    Ok(())
+}
+
+fn reason_label(r: &PruneReason) -> String {
+    match r {
+        PruneReason::LowConfidence {
+            confidence,
+            threshold,
+            days_no_access,
+        } => {
+            format!(
+                "low_conf conf={:.3} < {:.3}, {}d",
+                confidence, threshold, days_no_access
+            )
+        }
+        PruneReason::Stale {
+            confidence,
+            threshold,
+            days_no_access,
+        } => {
+            format!(
+                "stale conf={:.3} < {:.3}, {}d",
+                confidence, threshold, days_no_access
+            )
+        }
+        PruneReason::Isolated {
+            grace_days,
+            importance,
+            max_importance,
+            days_no_access,
+            ..
+        } => {
+            format!(
+                "isolated imp={:.2} < {:.2}, grace={}d, {}d no access",
+                importance, max_importance, grace_days, days_no_access
+            )
+        }
+    }
+}
+
+/// Show the first 8 chars of a UUID-style id safely (some test fixtures
+/// use shorter strings).
+fn short_id(id: &str) -> String {
+    if id.len() <= 8 {
+        id.to_string()
+    } else {
+        id[..8].to_string()
+    }
+}
+
 fn init_dotfiles() -> anyhow::Result<()> {
-    let home = std::env::var("HOME")?;
-    let data_dir = std::path::PathBuf::from(&home).join(".mneme");
+    // ponytail: respect MNEME_DATA_DIR like the rest of the codebase;
+    // the previous hard-coded $HOME/.mneme ignored the env override,
+    // making `MNEME_DATA_DIR=... mneme init` pollute the real home dir.
+    let data_dir = mneme::default_data_dir();
     let id_dir = data_dir.join("identity");
     std::fs::create_dir_all(&id_dir)?;
 

@@ -233,6 +233,56 @@ pub struct Memory {
 
     /// Pending LLM review at session-end.
     pub needs_review: bool,
+
+    /// Lifecycle state for agent-self memories (commitments, TODOs,
+    /// follow-ups, action items). Decoupled from `category` so any
+    /// memory can transition active→completed as the agent works
+    /// through it. See decisions.md D14.
+    pub status: ActionStatus,
+    /// Optional deadline (unix seconds). `memory_next` sorts by this
+    /// first; null means no specific deadline.
+    pub due_at: Option<DateTime<Utc>>,
+    /// Optional agent id for multi-agent lease / claim. When set, only
+    /// that agent should update this memory until released.
+    pub claimed_by: Option<String>,
+    /// Optional parent memory id (for sub-actions / decomposition).
+    pub parent_id: Option<String>,
+    /// When `status` became Completed (or Abandoned). Set by the
+    /// layer that performs the transition, not by direct assignment.
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+/// Lifecycle state for a memory. Distinct from `category`: any memory
+/// can be a commitment, observation, decision, etc. AND be in any of
+/// these states. The transition is driven by the agent as work
+/// progresses; not by external observers. See decisions.md D14.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionStatus {
+    /// Open / pending work. Default for new memories.
+    Active,
+    /// Agent has completed the work this memory represents.
+    Completed,
+    /// Work was abandoned (out of scope, wrong premise, etc.).
+    Abandoned,
+}
+
+impl ActionStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ActionStatus::Active => "active",
+            ActionStatus::Completed => "completed",
+            ActionStatus::Abandoned => "abandoned",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "active" => ActionStatus::Active,
+            "completed" => ActionStatus::Completed,
+            "abandoned" => ActionStatus::Abandoned,
+            _ => return None,
+        })
+    }
 }
 
 /// Input for creating a new memory.

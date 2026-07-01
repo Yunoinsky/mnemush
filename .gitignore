@@ -30,3 +30,7 @@ Thumbs.db
 
 # npm pack tarballs
 *.tgz
+
+# npm install creates root package-lock.json; per-package locks are committed
+/package-lock.json
+.pi/
