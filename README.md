@@ -14,9 +14,15 @@
 
 ## Status
 
-**v0.3.0 (2026-08-05)** — graph intelligence + agent self-memory.
+**v0.4.0 (2026-08-05)** — polish: backup/restore, multi-project isolation, schema-migration trait.
 
-Agent self-memory: the agent tracks its own commitments (`memory_next` / `memory_frontier` / `memory_action_create` / `memory_action_update`; status active/completed/abandoned, due_at, claimed_by, completed_at auto-managed). Graph analytics: `mneme graph pagerank` / `communities` / `export -f dot|json`. Self-eval observability: `mneme eval stats|dump|prune` with a bounded NDJSON log written by both Pi and OpenCode. 104 Rust + 31 OpenCode + 36 client + 26 hook tests as of HEAD.
+Backup: `mneme backup` produces a gzipped tarball of `~/.mneme/` (mneme.db via SQLite online backup API for WAL consistency, plus config.toml and identity/, optionally eval/). `mneme restore [-i FILE] [--target DIR] [--force] [--yes]` unpacks with downgrade protection.
+
+Multi-project: opt-in via `MNEME_PROJECT=foo` — writes auto-tag, reads scope to that project. `--all-projects` on search/list or `MNEME_ALL_PROJECTS=1` bypasses. Backward-compatible: without the env, behavior matches v0.3.
+
+Schema migration: `Migration` trait in `crates/mneme/src/migrations.rs`; registry walks in order. Each version bump is a struct impl + registry append — no `Store::migrate` changes for future bumps.
+
+114 Rust + 31 OpenCode + 36 client + 26 hook tests as of HEAD. Install via `git clone` + `./scripts/install.sh` (publish to crates.io/npm/Homebrew deferred — see ROADMAP).
 
 See [ROADMAP.md](ROADMAP.md) for what's done and what's next.
 

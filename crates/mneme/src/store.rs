@@ -19,9 +19,9 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use crate::error::{MnemeError, Result};
 use crate::schema::{Category, Memory, MemoryType, Source, Tier};
 
-const SCHEMA_VERSION: i32 = 3;
+pub(super) const SCHEMA_VERSION: i32 = 3;
 
-const SCHEMA_SQL: &str = r#"
+pub(super) const SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER PRIMARY KEY
 );
@@ -150,29 +150,19 @@ impl Store {
     }
 
     fn migrate(&mut self) -> Result<()> {
-        // v0.1 ships the current schema on a fresh DB. Older schema
-        // versions don't exist yet (v1+ will be added when a real
-        // migration is needed). If a future binary sees a newer
-        // schema_version, refuse to open to avoid silent corruption.
+        // Step 1: ensure the canonical schema (CREATE TABLE IF NOT
+        // EXISTS) is in place. For a fresh DB this is enough; for an
+        // existing DB it is a no-op.
         let tx = self.conn.transaction()?;
         tx.execute_batch(SCHEMA_SQL)?;
+
+        // Step 2: read the current schema_version. None = never
+        // initialized (treat as fresh); Some(v > SCHEMA_VERSION) =
+        // refuse to open (forward-compat guard); Some(v) = run the
+        // migrations whose target_version > v in order.
         let current: Option<i32> = tx
             .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
             .optional()?;
-        // Bug fix (ponytail): schema_version can be stale relative to
-        // the actual column shape if a prior migration ALTERed but
-        // forgot to UPDATE schema_version (or crashed between the two).
-        // Detect the real shape via pragma_table_info and only ADD
-        // columns that are missing — avoids crashing on duplicate-
-        // column errors when the migration is re-run on a half-migrated
-        // DB.
-        let has_col = |name: &str| -> Result<bool> {
-            let n: i64 = tx.query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('memory') WHERE name = ?1",
-                params![name], |r| r.get(0),
-            )?;
-            Ok(n > 0)
-        };
         match current {
             None => {
                 tx.execute(
@@ -186,58 +176,28 @@ impl Store {
                     v, SCHEMA_VERSION
                 )));
             }
-            Some(v) if v < 2 => {
-                // v0.1 → v0.2 migration: FTS5 rowid auto-assignment
-                // (already covered by execute_batch(SCHEMA_SQL) which
-                // creates the new shape). The old schema lacked
-                // `source NOT NULL` and several other columns; the new
-                // shape adds them with sensible defaults. No data
-                // movement needed since this is a fresh-DB version bump.
-                let alters: &[&str] = &[
-                    "ALTER TABLE memory ADD COLUMN source TEXT NOT NULL DEFAULT 'manual';",
-                    "ALTER TABLE memory ADD COLUMN initial_confidence REAL NOT NULL DEFAULT 1.0;",
-                    "ALTER TABLE memory ADD COLUMN confidence REAL NOT NULL DEFAULT 1.0;",
-                    "ALTER TABLE memory ADD COLUMN importance REAL NOT NULL DEFAULT 0.5;",
-                    "ALTER TABLE memory ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0;",
-                    "ALTER TABLE memory ADD COLUMN last_accessed_at INTEGER NOT NULL DEFAULT 0;",
-                    "ALTER TABLE memory ADD COLUMN override_half_life REAL;",
-                    "ALTER TABLE memory ADD COLUMN never_prune INTEGER NOT NULL DEFAULT 0;",
-                    "ALTER TABLE memory ADD COLUMN never_decay INTEGER NOT NULL DEFAULT 0;",
-                    "ALTER TABLE memory ADD COLUMN needs_review INTEGER NOT NULL DEFAULT 0;",
-                ];
-                for sql in alters {
-                    let col = sql.split("ADD COLUMN ").nth(1).unwrap_or("").split_whitespace().next().unwrap_or("");
-                    if !has_col(col)? {
-                        tx.execute_batch(sql)?;
+            Some(v) => {
+                // Walk the registry from low to high. Each migration
+                // bumps schema_version, so subsequent migrations see
+                // a fresh view. Migrations are idempotent (use
+                // pragma_table_info guards) so re-running on a half-
+                // migrated DB is safe.
+                for m in crate::migrations::default_registry() {
+                    if m.target_version() <= v as i64 {
+                        continue;
                     }
+                    m.up(&tx).map_err(|e| {
+                        MnemeError::Other(format!(
+                            "migration to v{}: {}",
+                            m.target_version(),
+                            e
+                        ))
+                    })?;
+                    tx.execute(
+                        "UPDATE schema_version SET version = ?1",
+                        params![m.target_version()],
+                    )?;
                 }
-                tx.execute_batch(
-                    "CREATE INDEX IF NOT EXISTS idx_memory_active ON memory(deleted_at) WHERE deleted_at IS NULL;",
-                )?;
-                tx.execute("UPDATE schema_version SET version = 2", [])?;
-            }
-            Some(v) if v < 3 => {
-                // v0.2 → v0.3 migration: add agent-self-memory lifecycle
-                // fields (status, due_at, claimed_by, parent_id,
-                // completed_at). All have defaults so existing rows
-                // get status='active', others null. See decisions.md D14.
-                let alters: &[&str] = &[
-                    "ALTER TABLE memory ADD COLUMN status TEXT NOT NULL DEFAULT 'active';",
-                    "ALTER TABLE memory ADD COLUMN due_at INTEGER;",
-                    "ALTER TABLE memory ADD COLUMN claimed_by TEXT;",
-                    "ALTER TABLE memory ADD COLUMN parent_id TEXT;",
-                    "ALTER TABLE memory ADD COLUMN completed_at INTEGER;",
-                ];
-                for sql in alters {
-                    let col = sql.split("ADD COLUMN ").nth(1).unwrap_or("").split_whitespace().next().unwrap_or("");
-                    if !has_col(col)? {
-                        tx.execute_batch(sql)?;
-                    }
-                }
-                tx.execute("UPDATE schema_version SET version = 3", [])?;
-            }
-            Some(_) => {
-                // Same version, no migration needed.
             }
         }
         tx.commit()?;

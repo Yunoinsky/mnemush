@@ -35,6 +35,19 @@ impl<'a> MemoryApi<'a> {
         Self { store, config }
     }
 
+    /// Resolve the project filter for read paths. Returns:
+    /// - `None` if no isolation is configured (backward-compatible —
+    ///   every project visible, including NULL).
+    /// - `Some("default")` if MNEME_PROJECT=default and cross-project
+    ///   reads are disabled (only this project's memories visible).
+    /// - `None` if cross-project reads are enabled (escape hatch).
+    pub fn effective_read_filter(&self) -> Option<&str> {
+        if self.config.project.cross_project_search {
+            return None;
+        }
+        self.config.project.default_project.as_deref()
+    }
+
     /// Compute SHA-256 of normalized content for dedup.
     pub fn content_hash(content: &str) -> String {
         let normalized: String = content
@@ -90,6 +103,13 @@ impl<'a> MemoryApi<'a> {
 
         let now = Utc::now();
         let topic = Self::topic_key(&m.title, &m.content);
+        // Project: caller-supplied wins; otherwise auto-tag with the
+        // config's default_project if isolation is enabled. NULL means
+        // "global / un-scoped" and is preserved for callers that don't
+        // configure isolation.
+        let project = m.project.or_else(|| {
+            self.config.project.default_project.clone()
+        });
         let memory = Memory {
             id: Uuid::now_v7().to_string(),
             memory_type: m.memory_type,
@@ -100,7 +120,7 @@ impl<'a> MemoryApi<'a> {
             context: m.context,
             topic_key: Some(topic),
             tags: m.tags,
-            project: m.project,
+            project,
             source: m.source,
             initial_confidence: self.config.forgetting.initial_confidence_default,
             confidence: self.config.forgetting.initial_confidence_default,
@@ -402,26 +422,48 @@ impl<'a> MemoryApi<'a> {
 
     /// List active memories (no soft-deleted).
     pub fn list(&self, limit: usize) -> Result<Vec<Memory>> {
-        self.store.list_active(limit)
+        // Apply the config-level project filter when isolation is
+        // enabled. Caller-supplied overrides go through list_in_project.
+        self.store
+            .list_active_filtered(limit, self.effective_read_filter())
+    }
+
+    pub fn list_in_project(
+        &self,
+        limit: usize,
+        project: Option<&str>,
+    ) -> Result<Vec<Memory>> {
+        self.store.list_active_filtered(limit, project)
     }
 
     /// Return the single highest-priority active action.
     /// Priority: `due_at` ASC (nulls last), then `created_at` ASC.
     /// Excludes completed and abandoned memories.
     pub fn memory_next(&self) -> Result<Option<Memory>> {
-        let mut stmt = self.store.conn.prepare(
-            r#"SELECT * FROM memory
-               WHERE deleted_at IS NULL
-                 AND status = 'active'
-                 AND category != 'identity'
+        let project = self.effective_read_filter();
+        let project_clause = if project.is_some() {
+            " AND m.project = ?1"
+        } else {
+            ""
+        };
+        let sql = format!(
+            r#"SELECT m.* FROM memory m
+               WHERE m.deleted_at IS NULL
+                 AND m.status = 'active'
+                 AND m.category != 'identity'{project_clause}
                ORDER BY
-                 CASE WHEN due_at IS NULL THEN 1 ELSE 0 END ASC,
-                 due_at ASC,
-                 created_at DESC,
-                 id DESC
+                 CASE WHEN m.due_at IS NULL THEN 1 ELSE 0 END ASC,
+                 m.due_at ASC,
+                 m.created_at DESC,
+                 m.id DESC
                LIMIT 1"#,
-        )?;
-        let mut rows = stmt.query_map([], Store::row_to_memory)?;
+        );
+        let mut stmt = self.store.conn.prepare(&sql)?;
+        let mut rows = if let Some(p) = project {
+            stmt.query_map(rusqlite::params![p], Store::row_to_memory)?
+        } else {
+            stmt.query_map([], Store::row_to_memory)?
+        };
         match rows.next() {
             Some(row) => Ok(Some(row?)),
             None => Ok(None),
@@ -429,22 +471,34 @@ impl<'a> MemoryApi<'a> {
     }
 
     /// Return all active actions, sorted by priority (due_at ASC,
-    /// nulls last; then created_at ASC). Excludes completed /
+    /// nulls last; then created_at DESC). Excludes completed /
     /// abandoned.
     pub fn memory_frontier(&self) -> Result<Vec<Memory>> {
-        let mut stmt = self.store.conn.prepare(
-            r#"SELECT * FROM memory
-               WHERE deleted_at IS NULL
-                 AND status = 'active'
-                 AND category != 'identity'
+        let project = self.effective_read_filter();
+        let project_clause = if project.is_some() {
+            " AND m.project = ?1"
+        } else {
+            ""
+        };
+        let sql = format!(
+            r#"SELECT m.* FROM memory m
+               WHERE m.deleted_at IS NULL
+                 AND m.status = 'active'
+                 AND m.category != 'identity'{project_clause}
                ORDER BY
-                 CASE WHEN due_at IS NULL THEN 1 ELSE 0 END ASC,
-                 due_at ASC,
-                 created_at DESC,
-                 id DESC"#,
-        )?;
-        let rows = stmt.query_map([], Store::row_to_memory)?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+                 CASE WHEN m.due_at IS NULL THEN 1 ELSE 0 END ASC,
+                 m.due_at ASC,
+                 m.created_at DESC,
+                 m.id DESC"#,
+        );
+        let mut stmt = self.store.conn.prepare(&sql)?;
+        let rows = if let Some(p) = project {
+            stmt.query_map(rusqlite::params![p], Store::row_to_memory)?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        } else {
+            stmt.query_map([], Store::row_to_memory)?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        };
         Ok(rows)
     }
 
@@ -471,9 +525,20 @@ impl<'a> MemoryApi<'a> {
             sql.push_str(" AND m.memory_type = ?");
             param_values.push(Box::new(t.as_str().to_string()));
         }
-        if let Some(p) = &opts.project {
+        // Project filter: caller-supplied wins; otherwise fall back to
+        // config-level isolation (None means "see all" — backward compat).
+        // opts.cross_project_override bypasses isolation entirely
+        // (CLI `--all-projects` flag).
+        let project_filter: Option<String> = if opts.cross_project_override {
+            None
+        } else {
+            opts.project
+                .clone()
+                .or_else(|| self.effective_read_filter().map(str::to_string))
+        };
+        if let Some(p) = project_filter {
             sql.push_str(" AND m.project = ?");
-            param_values.push(Box::new(p.clone()));
+            param_values.push(Box::new(p));
         }
         sql.push_str(" ORDER BY rank LIMIT ?");
         param_values.push(Box::new((limit * 3) as i64)); // fetch more, sort & trim
@@ -653,11 +718,33 @@ impl Store {
         }
     }
 
-    pub(crate) fn list_active(&self, limit: usize) -> Result<Vec<Memory>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT * FROM memory WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT ?1",
-        )?;
-        let rows = stmt.query_map(params![limit as i64], Store::row_to_memory)?;
+    /// List active memories with an optional project filter. Pass
+    /// `Some(name)` to scope to that project (exact match, NULLs
+    /// excluded); pass `None` for the backward-compatible "see all"
+    /// behavior.
+    pub(crate) fn list_active_filtered(
+        &self,
+        limit: usize,
+        project: Option<&str>,
+    ) -> Result<Vec<Memory>> {
+        let (sql, params_vec): (String, Vec<Box<dyn rusqlite::ToSql>>) = match project {
+            Some(p) => (
+                "SELECT * FROM memory WHERE deleted_at IS NULL AND project = ?1 \
+                 ORDER BY created_at DESC LIMIT ?2"
+                    .to_string(),
+                vec![Box::new(p.to_string()), Box::new(limit as i64)],
+            ),
+            None => (
+                "SELECT * FROM memory WHERE deleted_at IS NULL \
+                 ORDER BY created_at DESC LIMIT ?1"
+                    .to_string(),
+                vec![Box::new(limit as i64)],
+            ),
+        };
+        let mut stmt = self.conn.prepare(&sql)?;
+        let param_refs: Vec<&dyn rusqlite::ToSql> =
+            params_vec.iter().map(|b| &**b).collect();
+        let rows = stmt.query_map(param_refs.as_slice(), Store::row_to_memory)?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);
@@ -1267,5 +1354,81 @@ mod action_business_logic_tests {
         assert!(ids.contains(&a.id.as_str()));
         assert!(ids.contains(&c.id.as_str()));
         assert!(!ids.contains(&b.id.as_str()));
+    }
+
+    /// v0.4 project isolation: writes are auto-tagged with
+    /// default_project; reads default to that project; cross_project
+    /// escape hatch is opt-in.
+    #[test]
+    fn project_isolation_auto_tags_writes_and_filters_reads() {
+        let (store, mut cfg) = store();
+        cfg.project.default_project = Some("alpha".to_string());
+        let api = MemoryApi::new(&store, &cfg);
+        // Caller doesn't pass project → auto-tagged "alpha".
+        let a = api.add(make_mem("a", "alpha-mem")).unwrap();
+        let m = api.get(&a.id).unwrap().unwrap();
+        assert_eq!(m.project.as_deref(), Some("alpha"));
+
+        // Caller passes project="beta" → overrides the default.
+        let mut b = make_mem("b", "beta-mem");
+        b.project = Some("beta".to_string());
+        let b_id = api.add(b).unwrap().id;
+        let m = api.get(&b_id).unwrap().unwrap();
+        assert_eq!(m.project.as_deref(), Some("beta"));
+
+        // Reader without filter sees only "alpha" memories.
+        let list_alpha = api.list(100).unwrap();
+        assert_eq!(list_alpha.len(), 1);
+        assert_eq!(list_alpha[0].id, a.id);
+
+        // Explicit cross-project read sees all.
+        let list_all = api.list_in_project(100, None).unwrap();
+        assert_eq!(list_all.len(), 2);
+
+        // memory_next() respects the default filter.
+        let nxt = api.memory_next().unwrap().expect("has next");
+        assert_eq!(nxt.id, a.id);
+
+        // memory_frontier() respects the default filter.
+        let f = api.memory_frontier().unwrap();
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].id, a.id);
+    }
+
+    /// v0.4 cross_project_search flag bypasses isolation for reads.
+    #[test]
+    fn cross_project_search_bypasses_isolation() {
+        let (store, mut cfg) = store();
+        cfg.project.default_project = Some("default".to_string());
+        cfg.project.cross_project_search = true;
+        let api = MemoryApi::new(&store, &cfg);
+        let mut b = make_mem("other", "other-project");
+        b.project = Some("other-project".to_string());
+        api.add(b).unwrap();
+        // cross_project_search=true → effective filter is None →
+        // list returns everything regardless of default_project.
+        let mems = api.list(100).unwrap();
+        assert_eq!(mems.len(), 1, "cross-project escape should show the other-project memory");
+    }
+
+    /// v0.4 backward compatibility: with no default_project, NULL
+    /// project memories are visible (v0.3 behavior).
+    #[test]
+    fn no_default_project_is_backward_compatible() {
+        let (store, cfg) = store(); // default config — no project isolation
+        let api = MemoryApi::new(&store, &cfg);
+        // Memory with project=NULL.
+        let mut no_proj = make_mem("no-proj", "v");
+        no_proj.project = None;
+        let id1 = api.add(no_proj).unwrap().id;
+        // Memory with explicit project.
+        let mut with_proj = make_mem("with-proj", "v");
+        with_proj.project = Some("anywhere".to_string());
+        let id2 = api.add(with_proj).unwrap().id;
+        // Both visible (backward-compatible "see all").
+        let mems = api.list(100).unwrap();
+        let ids: Vec<&str> = mems.iter().map(|m| m.id.as_str()).collect();
+        assert!(ids.contains(&id1.as_str()));
+        assert!(ids.contains(&id2.as_str()));
     }
 }

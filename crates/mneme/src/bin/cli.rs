@@ -51,6 +51,9 @@ enum Cmd {
         limit: Option<usize>,
         #[arg(long)]
         project: Option<String>,
+        /// Bypass MNEME_PROJECT isolation and search every project.
+        #[arg(long)]
+        all_projects: bool,
     },
     /// Add a new memory.
     Add {
@@ -73,6 +76,9 @@ enum Cmd {
         limit: usize,
         #[arg(long)]
         category: Option<String>,
+        /// Bypass MNEME_PROJECT isolation and list every project.
+        #[arg(long)]
+        all_projects: bool,
     },
     /// Soft-delete a memory.
     Delete { id: String },
@@ -162,6 +168,35 @@ enum Cmd {
     Graph {
         #[command(subcommand)]
         action: GraphCmd,
+    },
+    /// Backup and restore the entire `~/.mneme/` data directory to a
+    /// gzipped tar archive. Round-trip: a fresh `mneme restore` into
+    /// an empty target dir restores every memory, identity file,
+    /// pending proposal, and self-eval log entry.
+    Backup {
+        /// Output path (default: ~/mneme-backup-<UTC>.tar.gz).
+        #[arg(long, short = 'o')]
+        output: Option<String>,
+        /// Include the eval/ NDJSON log (regenerable, default off).
+        #[arg(long)]
+        include_eval: bool,
+    },
+    /// Restore a backup archive. Refuses to overwrite a target whose
+    /// schema_version is newer than the backup (downgrade protection);
+    /// pass `--force` to override. Prompts for confirmation by default.
+    Restore {
+        /// Backup archive path.
+        #[arg(long, short = 'i')]
+        input: String,
+        /// Target directory (default: ~/.mneme).
+        #[arg(long)]
+        target: Option<String>,
+        /// Skip confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+        /// Allow downgrade (overwrite a newer DB).
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -304,11 +339,13 @@ fn main() -> anyhow::Result<()> {
             category,
             limit,
             project,
+            all_projects,
         } => {
             let opts = SearchOpts {
                 category: category.as_deref().and_then(Category::parse),
                 project,
                 limit,
+                cross_project_override: all_projects,
                 ..Default::default()
             };
             let api = MemoryApi::new(&store, &config);
@@ -366,9 +403,17 @@ fn main() -> anyhow::Result<()> {
                 None => println!("(not found)"),
             }
         }
-        Cmd::List { limit, category } => {
+        Cmd::List { limit, category, all_projects } => {
             let api = MemoryApi::new(&store, &config);
-            let mut mems = api.list(limit)?;
+            // --all-projects bypasses MNEME_PROJECT isolation; we
+            // call list_in_project with None so the filter doesn't
+            // kick in.
+            let project_filter = if all_projects {
+                None
+            } else {
+                api.effective_read_filter()
+            };
+            let mut mems = api.list_in_project(limit, project_filter)?;
             if let Some(c) = category.as_deref().and_then(Category::parse) {
                 mems.retain(|m| m.category == c);
             }
@@ -839,6 +884,62 @@ fn main() -> anyhow::Result<()> {
                         None => print!("{}", body),
                     }
                 }
+            }
+        }
+        Cmd::Backup { output, include_eval } => {
+            let data_dir = mneme::default_data_dir();
+            let out = match output {
+                Some(p) => std::path::PathBuf::from(p),
+                None => {
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+                    std::path::PathBuf::from(home)
+                        .join(format!("mneme-backup-{}.tar.gz", ts))
+                }
+            };
+            let meta = mneme::backup::create_backup_to(&data_dir, &out, include_eval)?;
+            println!(
+                "backup: {} (schema_version={}, memories={}, edges={})",
+                out.display(),
+                meta.schema_version,
+                meta.counts.active_memories,
+                meta.counts.edges,
+            );
+        }
+        Cmd::Restore { input, target, yes, force } => {
+            let target_dir = match target {
+                Some(t) => std::path::PathBuf::from(t),
+                None => mneme::default_data_dir(),
+            };
+            let archive = std::path::PathBuf::from(&input);
+            if !yes {
+                println!(
+                    "This will overwrite the contents of {} with data from {}.",
+                    target_dir.display(),
+                    archive.display()
+                );
+                println!("Type 'yes' to continue, anything else to abort:");
+                let mut line = String::new();
+                std::io::stdin().read_line(&mut line).map_err(|e| {
+                    mneme::error::MnemeError::Other(format!("stdin: {}", e))
+                })?;
+                if line.trim() != "yes" {
+                    println!("aborted");
+                    return Ok(());
+                }
+            }
+            match mneme::backup::restore_backup_to(&archive, &target_dir, force) {
+                Ok(meta) => println!(
+                    "restored {} (schema_version={}, memories={}, edges={})",
+                    target_dir.display(),
+                    meta.schema_version,
+                    meta.counts.active_memories,
+                    meta.counts.edges,
+                ),
+                Err(e) => return Err(e.into()),
             }
         }
     }

@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.4.0 (2026-08-05)
+
+### Added
+
+**Schema migration trait (`Migration`).** v0.1 → v0.2 (`V1ToV2`) and v0.2 → v0.3 (`V2ToV3`) are now individual `Migration` impls in `crates/mneme/src/migrations.rs`. `Store::migrate` walks the registry in order. Adding a v0.3 → v0.4 migration: write a struct impl'ing `Migration` and append to `default_registry()` — no `Store::migrate` changes needed. Migrations are idempotent (pragma_table_info guards) so re-running on a half-migrated DB is safe. 3 new unit tests: `registry_ends_at_schema_version` (catches "forgot to bump SCHEMA_VERSION"), `migrations_are_idempotent` (re-running is no-op), `registry_runs_in_registered_order`.
+
+**Multi-project isolation (v0.4).** Opt-in via env. Backward-compatible: with both `MNEME_PROJECT` unset, behavior matches v0.3.
+
+- `MNEME_PROJECT=foo` — auto-tag all new memories with `project=foo`; reads (search, list, `memory_next`, `memory_frontier`) are scoped to that project.
+- `MNEME_ALL_PROJECTS=1` (or `--all-projects` on `mneme search`/`mneme list`) — opt-in escape hatch: reads ignore the project filter.
+- `SearchOpts.cross_project_override` carries the CLI flag through (TS client never sets it; agent surface unchanged).
+- `Config::project = ProjectConfig { default_project, cross_project_search }`; `apply_env_overrides` wires the env vars.
+- 3 unit tests in `memory.rs`: `project_isolation_auto_tags_writes_and_filters_reads`, `cross_project_search_bypasses_isolation`, `no_default_project_is_backward_compatible`.
+
+**Backup / restore (`mneme backup`, `mneme restore`).** Round-trip the entire `~/.mneme/` data directory through a single gzipped tar archive.
+
+- `mneme backup [-o FILE] [--include-eval]` — produces `<UTC-timestamp>.tar.gz` in `$HOME` by default. The `mneme.db` inside is captured via the SQLite online backup API so WAL state is consistent (no need for `--checkpoint`). Manifest is the first entry, recording `mneme_version`, `schema_version`, and live counts. Optional `eval/` inclusion (default off — eval NDJSON is regenerable).
+- `mneme restore -i FILE [--target DIR] [--force] [--yes]` — unpacks into `~/.mneme` by default. Prompts for `yes` confirmation. Refuses to overwrite a target whose `schema_version` is newer than the backup's; pass `--force` to override. `safe_join()` rejects `..` segments and absolute paths in the archive so a hostile tar can't escape `target_dir`.
+- New module `crates/mneme/src/backup.rs`: `BackupMeta`, `Counts`, `create_backup_to`, `restore_backup_to`, `snapshot_meta`. 4 unit tests (round-trip, downgrade refusal, eval round-trip, unsafe-path rejection).
+
 ## v0.3.0 (2026-08-05)
 
 ### Added

@@ -318,7 +318,7 @@ export class MnemeClient {
     await this.rpc("initialize", {
       protocolVersion: "2024-11-05",
       capabilities: {},
-      clientInfo: { name: "mneme-client", version: "0.3.0" },
+      clientInfo: { name: "mneme-client", version: "0.4.0" },
     });
     // Fire-and-forget notification.
     this.notify("notifications/initialized", {});

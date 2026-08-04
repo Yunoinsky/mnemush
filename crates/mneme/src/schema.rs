@@ -335,6 +335,13 @@ pub struct SearchOpts {
     pub limit: Option<usize>,
     /// Min confidence (post-decay) for inclusion.
     pub min_confidence: Option<f32>,
+    /// CLI-only escape hatch: when true, ignore MNEME_PROJECT
+    /// isolation and search every project. The MCP/agent surface
+    /// never sets this; it only flows through the `mneme` CLI's
+    /// `--all-projects` flag. `serde(default)` so existing TS
+    /// clients don't trip on the new field.
+    #[serde(default)]
+    pub cross_project_override: bool,
 }
 
 /// A search result.

@@ -12,6 +12,7 @@
 //!
 //! Binaries (`mneme` CLI, `mneme-mcp` server) are in `bin/`.
 
+pub mod backup;
 pub mod config;
 pub mod edge;
 pub mod error;
@@ -20,6 +21,7 @@ pub mod forget;
 pub mod graph;
 pub mod identity;
 pub mod memory;
+pub mod migrations;
 pub mod scanner;
 pub mod schema;
 pub mod store;

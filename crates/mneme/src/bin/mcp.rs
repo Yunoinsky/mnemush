@@ -463,6 +463,7 @@ fn call_memory_search(p: Value, store: &Store, config: &Config, id: Value) -> Js
         project: p.get("project").and_then(|v| v.as_str()).map(String::from),
         limit: p.get("limit").and_then(|v| v.as_u64()).map(|n| n as usize),
         min_confidence: None,
+        cross_project_override: false,
     };
     let api = MemoryApi::new(store, config);
     match api.search(query, opts) {

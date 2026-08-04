@@ -1,6 +1,6 @@
 [package]
 name = "mneme"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.75"
 description = "Brain-inspired memory layer for AI coding agents"
@@ -23,7 +23,7 @@ path = "src/bin/mcp.rs"
 
 [dependencies]
 # Storage
-rusqlite = { version = "0.32", features = ["bundled", "chrono"] }
+rusqlite = { version = "0.32", features = ["backup", "bundled", "chrono"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -42,6 +42,10 @@ hex = "0.4"
 
 # Text processing
 regex = "1"
+
+# Backup format: gzipped tar archive (v0.4)
+tar = "0.4"
+flate2 = "1"
 
 # CLI
 clap = { version = "4", features = ["derive"] }

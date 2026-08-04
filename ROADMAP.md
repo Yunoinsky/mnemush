@@ -21,14 +21,18 @@ Auto-maintenance + v0.3 first cut (graph intelligence) shipped in the same relea
 - DOT/D3 export (Graphviz, web viewer). **DONE** — `mneme graph export -f dot|json` with `--ranks` / `--communities` annotations.
 - Self-eval observability. **DONE** — `mneme eval stats|dump|prune`; per-session NDJSON written by both Pi and OpenCode; bounded log (30d TTL / 5000 lines/file / 30 files).
 
-## v0.4.0 — Polish 📋 Planned
+## v0.4.0 — Released 2026-08-05 ✅
+
+Polish: backup/restore, schema-migration trait, multi-project isolation. See [CHANGELOG.md](CHANGELOG.md).
+
+## v0.4.0 — Polish ✅ Shipped
 
 Each bullet ends with **Done when:** so progress is unambiguous.
 
-- Backup/restore (`mneme backup`, `mneme restore`). **Done when:** CLI commands produce/restore a tarball of `~/.mneme/` and round-trip identically through a clean install.
-- Schema migration system (automatic upgrades). **Done when:** every schema change ships with a `Migration` trait impl; a v0.3 db upgrades to v0.4 without manual SQL.
-- Multi-project support. **Done when:** `--project <name>` flag isolates memories per project; default project = `default`; cross-project search is opt-in.
-- Publish to crates.io, npm, Homebrew. **Done when:** `cargo install mneme`, `npm i -g mneme-pi`, `brew install mneme` all work end-to-end.
+- Backup/restore (`mneme backup`, `mneme restore`). **DONE** — gzipped tar archive containing `mneme.db` (via SQLite online backup API for WAL consistency), `config.toml`, `identity/`, optionally `eval/`. Archive starts with `MANIFEST.json` carrying version, schema_version, counts. Restore refuses to overwrite a target with a newer schema_version (downgrade guard); pass `--force` to override. Prompts for confirmation by default.
+- Schema migration system (automatic upgrades). **DONE** — `Migration` trait in `crates/mneme/src/migrations.rs`; each version bump is a `Migration` impl in the registry. Adding a new version: write a struct impl'ing `Migration`, append to `default_registry()`. Migrations are idempotent (pragma_table_info guards) so re-running on a half-migrated DB is safe. `Store::migrate` walks the registry in order and bumps `schema_version` after each.
+- Multi-project support. **DONE** — opt-in via `MNEME_PROJECT=foo` (auto-tag writes, scope reads). `--all-projects` on `search`/`list` bypasses isolation; `MNEME_ALL_PROJECTS=1` makes it the default. Without MNEME_PROJECT, behavior is identical to v0.3 (NULL projects visible everywhere) — fully backward-compatible. `SearchOpts.cross_project_override` is the CLI-only escape hatch (TS client never sets it).
+- Publish to crates.io, npm, Homebrew. **DEFERRED** — the repo is the source of truth; users install via `git clone` + `./scripts/install.sh` for now. When ready: `cargo install mneme`, `npm i -g mneme-pi`, `brew install mneme` should all work end-to-end. Pre-publish checklist: Cargo.toml license/description/repo, `cargo package` dry-run, npm package.json fields, brew formula.
 
 ## v1.0.0 — Stable 📋 Planned
 

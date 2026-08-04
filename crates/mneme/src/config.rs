@@ -20,6 +20,7 @@ pub struct Config {
     pub search: SearchConfig,
     pub storage: StorageConfig,
     pub eval: EvalConfig,
+    pub project: ProjectConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -164,6 +165,38 @@ impl Default for EvalConfig {
     }
 }
 
+/// Multi-project isolation (v0.4).
+///
+/// `default_project`: when set, all writes (memory_add) are tagged
+/// with this project unless the caller overrides it, and all reads
+/// (search, list, memory_next, memory_frontier) are filtered to this
+/// project. When `None` (the default), no isolation — memories with
+/// `project = NULL` are visible everywhere, and writes don't auto-tag.
+///
+/// `cross_project_search`: opt-in escape hatch. When true (or
+/// `MNEME_ALL_PROJECTS=1`), reads ignore the project filter. Writes
+/// are still always auto-tagged with `default_project` unless the
+/// caller overrides.
+///
+/// Backward compatibility: with both fields at defaults, behavior
+/// matches v0.3 (no project isolation). Setting `default_project` via
+/// env (`MNEME_PROJECT`) or config.toml is opt-in.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProjectConfig {
+    pub default_project: Option<String>,
+    pub cross_project_search: bool,
+}
+
+impl Default for ProjectConfig {
+    fn default() -> Self {
+        Self {
+            default_project: None,
+            cross_project_search: false,
+        }
+    }
+}
+
 impl Config {
     /// Load config from default locations + environment variables.
     pub fn load() -> Result<Self> {
@@ -276,6 +309,21 @@ fn apply_env_overrides(cfg: &mut Config) {
     }
     if let Ok(v) = std::env::var("MNEME_DB_PATH") {
         cfg.storage.db_path = v;
+    }
+    // MNEME_PROJECT enables per-project isolation. Set to a non-empty
+    // string to scope writes/reads to that project; cross-project
+    // reads require MNEME_ALL_PROJECTS=1.
+    if let Ok(v) = std::env::var("MNEME_PROJECT") {
+        if !v.is_empty() {
+            cfg.project.default_project = Some(v);
+        }
+    }
+    if let Ok(v) = std::env::var("MNEME_ALL_PROJECTS") {
+        if let Ok(b) = v.parse::<bool>() {
+            cfg.project.cross_project_search = b;
+        } else if v == "1" {
+            cfg.project.cross_project_search = true;
+        }
     }
 }
 

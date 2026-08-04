@@ -81,3 +81,16 @@ max_entries_per_file = 5000 # keep the newest N lines per session file
 max_session_files = 30     # keep the N most-recent session files
 
 #   MNEME_EVAL_PRUNE_ON_SESSION_END=off   skip eval-log pruning at session_end
+
+# ── Multi-project isolation (v0.4) ─────────────────────────────────────────
+# Default project for writes (and read scope) when isolation is on.
+# Empty = no isolation; every memory is global / cross-project.
+# Env: MNEME_PROJECT=foo
+[project]
+default_project = ""
+
+# When true, reads (search, list, memory_next, memory_frontier) ignore
+# the default_project filter. Writes are still auto-tagged unless the
+# caller overrides. Equivalent to passing --all-projects on every CLI
+# read command. Env: MNEME_ALL_PROJECTS=1
+cross_project_search = false
