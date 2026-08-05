@@ -1,6 +1,134 @@
 # Changelog
 
+## v1.0.0 (2026-08-06) ✅ Released
+
+**Stable.** v1.0 ships: API stability surface (3 docs layers),
+optional semantic search (blended BM25 + cosine), full v0.x test
+suites, schema v4 with auto-migration. Cross-platform CI and
+publish-to-registry remain ROADMAP items for v1.x.
+
+### Added
+
+**Auto-merge of near-duplicate memories (v1.0).** When adding a
+note/skill/insight/episodic memory whose content is Jaccard-similar
+(>= `auto_merge_min_sim`, default 0.6) to an existing memory, the
+OLD one is soft-deleted and its edges retargeted to the NEW one.
+
+Catches the failure mode that exact content-hash dedup can't:
+repeated captures of an evolving document (e.g. SKILL.md) where a
+one-word change bypasses the hash. Decision/Correction/Preference
+categories are untouched — they keep the supersede-edge behavior.
+
+- Config: `[edges] auto_merge_enabled` (default true) and
+  `auto_merge_min_sim` (default 0.6, stricter than supersede's 0.5).
+- Merge is transactional: edge retarget (with self-loop cleanup),
+  soft-delete old + its FTS5 row, `memory_auto_merge` audit event.
+- 3 unit tests: near-dup note consolidates, decisions don't merge
+  (supersede edge instead), merged edges are retargeted.
+
+**Cross-machine sync (v1.0).** Git as the transport, mneme as
+the codec.
+
+- `mneme sync init [-d DIR]` — `git init` + first snapshot commit.
+- `mneme sync export [-d DIR]` — write current DB state to a sync
+dir (no git ops).
+- `mneme sync import -d DIR` — read a sync dir into the local DB.
+Refuses snapshots from newer schema_version; reports per-memory
+conflicts (local updated_at newer than snapshot) but leaves those
+rows for manual resolution.
+
+Sync dir layout: `MANIFEST.json` (schema_version + counts),
+`memory.json` (all rows), `edges.json`, `identity/` (verbatim
+USER/PERSONA/CONSTITUTION + pending.jsonl), `embeddings/` (one JSON
+per (model, memory_id)).
+
+New module `crates/mneme/src/sync.rs`: `Manifest`, `Counts`,
+`export_to`, `init_sync`, `import_from`, `ImportReport`. 4 new unit
+tests (round-trip, git repo creation, newer-schema refusal, local-
+newer conflict detection).
+
+**Fixed: fresh-DB migration was broken.** `Store::migrate`'s fresh-
+DB arm ran the migration registry but used `INSERT OR REPLACE INTO
+schema_version` — since `version` is the PK, different versions
+never conflicted, so the table accumulated rows 2,3,4 and `SELECT
+version` read the first (= 2). Now the first migration INSERTs, the
+rest UPDATE the single row. (Bug surfaced by the new sync tests —
+their fresh in-memory DBs reported schema_version 2 instead of 4.)
+
+**Cross-platform CI (v1.0).** `windows-latest` added to the
+rust, ts, and mcp-smoke jobs. All `run:` steps explicitly set
+`shell: bash` for cross-OS consistency. The mcp-smoke job now
+also installs Python 3.11 via `setup-python@v5` so
+`scripts/test-mcp.py` finds `python3` on Windows. Strategy uses
+`fail-fast: false` on the mcp-smoke matrix so a single-OS failure
+doesn't hide the others.
+
+**Search blend with embeddings (v1.0).** When
+`[embedding] enabled = true`, `MemoryApi::search` blends cosine
+similarity over a sentence-transformer embedding with the BM25
+score. Final score = `bm25_weight * norm(bm25) + embed_weight * cosine`,
+where `norm(bm25)` min-max-scales the BM25 within the hit set so
+both signals live in `[0, 1]`. Falls back silently to BM25-only
+when embeddings are disabled or no embeddings are stored yet.
+
+- New `cached_embedder(model_id)` in `crates/mneme/src/embeddings.rs`
+  uses `OnceLock<Mutex<HashMap<String, Arc<Mutex<Embedder>>>>>` to
+  load the heavy model at most once per process. The fastembed
+  `embed()` requires `&mut self`, hence the inner `Mutex`.
+- `Store::embeddings_for(memory_ids, model)` returns the stored
+  embeddings for a specific id set (used by the blend path; avoids
+  loading the entire `all_embeddings` set when only a few hits need
+  scoring).
+- 2 new tests in `memory.rs`: `search_with_embeddings_disabled_still_works`
+  (regression — disabled branch is hit, score field unchanged) and
+  `cosine_for_blend_search` (cosine math sanity: identical = 1,
+  orthogonal = 0, zero-norm = 0).
+
+**Optional semantic search (v1.0, foundation).** Off by default.
+When `[embedding] enabled = true`, `mneme embed` downloads a
+sentence-transformer model (default all-MiniLM-L6-v2 quantized,
+~25 MB) to `~/.mneme/models/` and stores per-memory embeddings in
+the new `memory_embedding` table.
+
+- New module `crates/mneme/src/embeddings.rs` — `Embedder`
+  (loads + caches model), `cosine()` (vector similarity), `top_n_cosine()`
+  (brute-force ranker), `put_embedding_tx()` / `Store::get_embedding()`
+  / `all_embeddings()` / `embeddings_for()` / `count_embeddings()`
+  (SQLite accessors).
+- New migration `V3ToV4` (idempotent) adds the `memory_embedding`
+  table; `SCHEMA_VERSION` bumped to 4. Verified against the live
+  home DB — schema_version auto-bumped from 3 → 4 on first open.
+- Config: new `[embedding]` section (`enabled`, `model`,
+  `bm25_weight`, `embed_weight`); `Config::EmbeddingConfig` +
+  `Default`. Default blend: 0.7 BM25 / 0.3 cosine.
+- CLI: `mneme embed [--title-contains PAT] [--force]` backfills
+  embeddings for matching active memories. `--force` re-embeds even
+  when an embedding for the configured model already exists.
+- `fastembed = "5"` as a new Cargo dependency. Builds ONNX Runtime
+  from source via `ort-download-binaries-native-tls` (no system dep).
+- 7 new unit tests: cosine identities, ranking, exclude filter,
+  store/retrieve roundtrip, UPSERT overwrite.
+
+### Added
+
+**Documentation site (v1.0 docs).** Three layers, all published:
+
+- **Rust API** — auto-publishes to [docs.rs/mneme](https://docs.rs/mneme) on every crates.io release. Driven by `Cargo.toml` metadata (`description`, `license`, `repository`, `keywords`, `categories`) — all present. Local: `cargo doc --manifest-path crates/mneme/Cargo.toml --no-deps --open`.
+- **TypeScript API** — typedoc-driven, `npm run docs:ts` → `target/docs/typedoc/index.html`. Config in `typedoc.json` (skips bundled-TS internal typecheck, excludes private members, categorizes by group).
+- **Conceptual docs** — markdown served directly by GitHub: README, ARCHITECTURE, ROADMAP, CHANGELOG, decisions, config example, RELEASING. Already complete; nothing to publish.
+
+README gained a "Documentation (v1.0)" section pointing at all three.
+
+### Changed
+
+- `#![warn(missing_docs)]` in `crates/mneme/src/lib.rs` enforces /// on public items. New pub items without docs trigger CI warnings; existing field-level gaps are deferred (warning, not deny).
+- `target/docs` is git-ignored (typedoc + cargo doc output).
+
 ## v0.4.0 (2026-08-05)
+
+### Fixed
+
+**Multi-project isolation (v0.4).** Opt-in via env. Backward-compatible: with both `MNEME_PROJECT` unset, behavior matches v0.3.
 
 ### Added
 

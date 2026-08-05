@@ -17,9 +17,9 @@ use chrono::{DateTime, TimeZone, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 use crate::error::{MnemeError, Result};
-use crate::schema::{Category, Memory, MemoryType, Source, Tier};
+use crate::schema::{Category, Edge, Memory, MemoryType, Source, Tier};
 
-pub(super) const SCHEMA_VERSION: i32 = 3;
+pub(super) const SCHEMA_VERSION: i32 = 4;
 
 pub(super) const SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -165,10 +165,40 @@ impl Store {
             .optional()?;
         match current {
             None => {
-                tx.execute(
-                    "INSERT INTO schema_version (version) VALUES (?1)",
-                    params![SCHEMA_VERSION],
-                )?;
+                // Fresh DB: run the full registry so every table
+                // (including ones added by later migrations, e.g.
+                // memory_embedding from V3ToV4) exists. This was a
+                // bug in v0.4: the None arm inserted SCHEMA_VERSION
+                // directly, skipping the registry, so a fresh DB
+                // never got tables created by non-first migrations.
+                // Fresh DB: the schema_version table is empty, so the
+                // first migration's INSERT creates the row and each
+                // subsequent UPDATE overwrites it. (INSERT OR REPLACE
+                // would accumulate rows because `version` is the PK —
+                // different version values never conflict, so the
+                // SELECT later reads the first = the oldest.)
+                let mut first = true;
+                for m in crate::migrations::default_registry() {
+                    m.up(&tx).map_err(|e| {
+                        MnemeError::Other(format!(
+                            "fresh-db migration to v{}: {}",
+                            m.target_version(),
+                            e
+                        ))
+                    })?;
+                    if first {
+                        tx.execute(
+                            "INSERT INTO schema_version (version) VALUES (?1)",
+                            params![m.target_version()],
+                        )?;
+                        first = false;
+                    } else {
+                        tx.execute(
+                            "UPDATE schema_version SET version = ?1",
+                            params![m.target_version()],
+                        )?;
+                    }
+                }
             }
             Some(v) if v > SCHEMA_VERSION => {
                 return Err(MnemeError::Other(format!(
@@ -187,11 +217,7 @@ impl Store {
                         continue;
                     }
                     m.up(&tx).map_err(|e| {
-                        MnemeError::Other(format!(
-                            "migration to v{}: {}",
-                            m.target_version(),
-                            e
-                        ))
+                        MnemeError::Other(format!("migration to v{}: {}", m.target_version(), e))
                     })?;
                     tx.execute(
                         "UPDATE schema_version SET version = ?1",
@@ -396,6 +422,37 @@ impl Store {
     }
 
     // ── Audit log ───────────────────────────────────────────────────
+
+    /// Read an `Edge` row from a `memory_edge` SELECT. Public so
+    /// `crate::sync` (cross-machine export) can use it without
+    /// exposing the row-tuple format.
+    pub fn row_to_edge(row: &rusqlite::Row) -> rusqlite::Result<Edge> {
+        let edge_type_str: String = row.get("edge_type")?;
+        let access_count_i: i32 = row.get("access_count")?;
+        let bidirectional_i: i32 = row.get("bidirectional")?;
+        let last_activated_ts: Option<i64> = row.get("last_activated")?;
+        let created_at_ts: i64 = row.get("created_at")?;
+        let deleted_at_ts: Option<i64> = row.get("deleted_at")?;
+        Ok(Edge {
+            id: row.get("id")?,
+            source_id: row.get("source_id")?,
+            target_id: row.get("target_id")?,
+            edge_type: crate::schema::EdgeType::parse(&edge_type_str)
+                .unwrap_or(crate::schema::EdgeType::Related),
+            strength: row.get("strength")?,
+            initial_strength: row.get("initial_strength")?,
+            bidirectional: bidirectional_i != 0,
+            provenance: row.get("provenance")?,
+            evidence: row.get("evidence")?,
+            context: row.get("context")?,
+            access_count: access_count_i.max(0) as u32,
+            last_activated: last_activated_ts.and_then(|t| chrono::DateTime::from_timestamp(t, 0)),
+            stability: row.get("stability")?,
+            created_at: chrono::DateTime::from_timestamp(created_at_ts, 0)
+                .unwrap_or_else(chrono::Utc::now),
+            deleted_at: deleted_at_ts.and_then(|t| chrono::DateTime::from_timestamp(t, 0)),
+        })
+    }
 
     pub fn log_event(
         &self,
@@ -659,7 +716,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("half.db");
         let conn = rusqlite::Connection::open(&path).unwrap();
-        conn.execute_batch(r#"
+        conn.execute_batch(
+            r#"
             CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
             INSERT INTO schema_version (version) VALUES (2);
             CREATE TABLE memory (
@@ -679,27 +737,45 @@ mod tests {
                 content_hash TEXT NOT NULL,
                 deleted_at INTEGER, needs_review INTEGER NOT NULL DEFAULT 0
             );
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         // Simulate the crash: ALTERs ran, but schema_version not bumped.
-        conn.execute_batch("ALTER TABLE memory ADD COLUMN status TEXT NOT NULL DEFAULT 'active';").unwrap();
-        conn.execute_batch("ALTER TABLE memory ADD COLUMN due_at INTEGER;").unwrap();
-        conn.execute_batch("ALTER TABLE memory ADD COLUMN claimed_by TEXT;").unwrap();
-        conn.execute_batch("ALTER TABLE memory ADD COLUMN parent_id TEXT;").unwrap();
-        conn.execute_batch("ALTER TABLE memory ADD COLUMN completed_at INTEGER;").unwrap();
+        conn.execute_batch("ALTER TABLE memory ADD COLUMN status TEXT NOT NULL DEFAULT 'active';")
+            .unwrap();
+        conn.execute_batch("ALTER TABLE memory ADD COLUMN due_at INTEGER;")
+            .unwrap();
+        conn.execute_batch("ALTER TABLE memory ADD COLUMN claimed_by TEXT;")
+            .unwrap();
+        conn.execute_batch("ALTER TABLE memory ADD COLUMN parent_id TEXT;")
+            .unwrap();
+        conn.execute_batch("ALTER TABLE memory ADD COLUMN completed_at INTEGER;")
+            .unwrap();
         drop(conn);
         // Now open via Store::open: must NOT crash on duplicate-column.
         let store = Store::open(&path).unwrap();
-        let v: i32 = store.conn.query_row("SELECT version FROM schema_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, SCHEMA_VERSION, "schema_version should advance to {}", SCHEMA_VERSION);
+        let v: i32 = store
+            .conn
+            .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            v, SCHEMA_VERSION,
+            "schema_version should advance to {}",
+            SCHEMA_VERSION
+        );
         // And v0.3 columns are still there.
-        let n: i64 = store.conn.query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('memory') WHERE name='status'",
-            [], |r| r.get(0),
-        ).unwrap();
+        let n: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('memory') WHERE name='status'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(n, 1, "status column should still be present");
     }
 
-#[test]
+    #[test]
     fn fts5_handles_parens() {
         let store = Store::open_in_memory().unwrap();
         let mut m = sample_memory();
@@ -750,7 +826,6 @@ mod tests {
             claimed_by: None,
             parent_id: None,
             completed_at: None,
-
         }
     }
 }

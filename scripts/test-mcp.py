@@ -15,6 +15,12 @@ import shutil
 import subprocess
 import sys
 
+# Windows consoles default to cp1252 which can't encode ✓/× — force
+# UTF-8 so the smoke test doesn't die on a print.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 DB_PATH = os.environ.get("MNEME_DB_PATH", "/tmp/mneme-mcp-smoke.db")
 DATA_DIR = os.environ.get("MNEME_DATA_DIR", "/tmp/mneme-mcp-smoke-data")
 for ext in ("", "-wal", "-shm"):
@@ -29,7 +35,7 @@ env["MNEME_DB_PATH"] = DB_PATH
 env["MNEME_DATA_DIR"] = DATA_DIR
 
 proc = subprocess.Popen(
-    ["mneme-mcp"],
+    ["mneme-mcp.exe" if os.name == "nt" else "mneme-mcp"],
     stdin=subprocess.PIPE,
     stdout=subprocess.PIPE,
     stderr=subprocess.PIPE,

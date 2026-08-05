@@ -66,9 +66,8 @@ pub fn prune_apply(cfg: &EvalConfig) -> Result<PruneReport> {
     let dir = eval_dir();
     if !dir.exists() {
         // Create the dir so subsequent writes don't fail. Cheap.
-        fs::create_dir_all(&dir).map_err(|e| {
-            MnemeError::Other(format!("create eval dir {}: {}", dir.display(), e))
-        })?;
+        fs::create_dir_all(&dir)
+            .map_err(|e| MnemeError::Other(format!("create eval dir {}: {}", dir.display(), e)))?;
         return Ok(PruneReport::default());
     }
     prune_inner(&dir, cfg, /*apply=*/ true)
@@ -92,7 +91,10 @@ fn prune_inner(dir: &Path, cfg: &EvalConfig, apply: bool) -> Result<PruneReport>
             continue;
         }
         let mtime = match fs::metadata(&path).and_then(|m| m.modified()) {
-            Ok(t) => t.duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0),
+            Ok(t) => t
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0),
             // Ponytail bug fix: silently defaulting mtime=0 made every
             // file look ancient (epoch = 1970), so the age cap dropped
             // everything. If we can't read mtime, treat the file as
@@ -109,9 +111,8 @@ fn prune_inner(dir: &Path, cfg: &EvalConfig, apply: bool) -> Result<PruneReport>
     for (path, mtime) in files {
         if cfg.max_age_days > 0 && (now - mtime) > age_cutoff_secs {
             if apply {
-                fs::remove_file(&path).map_err(|e| {
-                    MnemeError::Other(format!("remove {}: {}", path.display(), e))
-                })?;
+                fs::remove_file(&path)
+                    .map_err(|e| MnemeError::Other(format!("remove {}: {}", path.display(), e)))?;
             }
             report.files_removed_age += 1;
         } else {
@@ -123,7 +124,8 @@ fn prune_inner(dir: &Path, cfg: &EvalConfig, apply: bool) -> Result<PruneReport>
     // `max_entries_per_file` non-empty lines, rewrite if any dropped.
     // Track per-file line counts so step 3 can subtract dropped files
     // from the total when the file-count cap fires.
-    let mut file_lines: std::collections::HashMap<PathBuf, usize> = std::collections::HashMap::new();
+    let mut file_lines: std::collections::HashMap<PathBuf, usize> =
+        std::collections::HashMap::new();
     let mut total_lines_kept: usize = 0;
     for (path, _) in &survivors {
         let content = match fs::read_to_string(path) {
@@ -140,17 +142,12 @@ fn prune_inner(dir: &Path, cfg: &EvalConfig, apply: bool) -> Result<PruneReport>
             let drop_n = total - cfg.max_entries_per_file;
             report.lines_dropped_count += drop_n;
             // Estimate bytes: total bytes / total lines × drop_n.
-            let avg = if total > 0 { content.len() / total } else { 0 };
+            let avg = content.len().checked_div(total).unwrap_or(0);
             report.bytes_recovered_estimated += (drop_n * avg) as u64;
             if apply {
-                let kept: Vec<&str> = non_empty
-                    .iter()
-                    .skip(drop_n)
-                    .copied()
-                    .collect();
-                let mut f = fs::File::create(path).map_err(|e| {
-                    MnemeError::Other(format!("rewrite {}: {}", path.display(), e))
-                })?;
+                let kept: Vec<&str> = non_empty.iter().skip(drop_n).copied().collect();
+                let mut f = fs::File::create(path)
+                    .map_err(|e| MnemeError::Other(format!("rewrite {}: {}", path.display(), e)))?;
                 for line in kept {
                     writeln!(f, "{}", line).map_err(|e| {
                         MnemeError::Other(format!("write {}: {}", path.display(), e))
@@ -169,13 +166,13 @@ fn prune_inner(dir: &Path, cfg: &EvalConfig, apply: bool) -> Result<PruneReport>
     // first `max_session_files`, remove the rest. Subtract the lines
     // of removed files from `total_lines_kept` so `lines_kept` reflects
     // reality.
-    survivors.sort_by(|a, b| b.1.cmp(&a.1));
+    use std::cmp::Reverse;
+    survivors.sort_by_key(|(_, mtime)| Reverse(*mtime));
     if survivors.len() > cfg.max_session_files {
         for (path, _) in survivors.iter().skip(cfg.max_session_files) {
             if apply {
-                fs::remove_file(path).map_err(|e| {
-                    MnemeError::Other(format!("remove {}: {}", path.display(), e))
-                })?;
+                fs::remove_file(path)
+                    .map_err(|e| MnemeError::Other(format!("remove {}: {}", path.display(), e)))?;
             }
             report.files_removed_count += 1;
             if let Some(n) = file_lines.get(path) {
@@ -221,7 +218,8 @@ mod tests {
     }
 
     fn fresh_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("mneme-eval-test-{}-{}", name, std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("mneme-eval-test-{}-{}", name, std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -230,7 +228,10 @@ mod tests {
     #[test]
     fn dry_run_does_not_write() {
         let dir = fresh_dir("dryrun");
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
         write_session(&dir, "s1", 100, now); // current mtime → keep
         write_session(&dir, "s2", 5_000, now);
         let cfg = EvalConfig {
@@ -241,8 +242,14 @@ mod tests {
         let r = prune_dry_run_with_dir(&dir, &cfg).unwrap();
         assert_eq!(r.files_kept, 2);
         // Files still exist with original line counts.
-        let s1_lines = fs::read_to_string(dir.join("s1.ndjson")).unwrap().lines().count();
-        let s2_lines = fs::read_to_string(dir.join("s2.ndjson")).unwrap().lines().count();
+        let s1_lines = fs::read_to_string(dir.join("s1.ndjson"))
+            .unwrap()
+            .lines()
+            .count();
+        let s2_lines = fs::read_to_string(dir.join("s2.ndjson"))
+            .unwrap()
+            .lines()
+            .count();
         assert_eq!(s1_lines, 100);
         assert_eq!(s2_lines, 5_000);
         let _ = fs::remove_dir_all(&dir);
@@ -269,7 +276,10 @@ mod tests {
         let r = prune_apply_with_dir(&dir, &cfg).unwrap();
         // 2 old removed by age, 1 by count cap (after age-sort, fresh1+fresh2+huge → keep 2).
         assert_eq!(r.files_removed_age, 2, "old1 + old2 should be aged out");
-        assert_eq!(r.files_removed_count, 1, "after age: 3 survivors, cap=2 → drop 1");
+        assert_eq!(
+            r.files_removed_count, 1,
+            "after age: 3 survivors, cap=2 → drop 1"
+        );
         // huge file trimmed from 5000 → 1000 lines.
         assert_eq!(r.lines_dropped_count, 4_000);
         // After trim + count cap, 2 files survive with 10 + 1000 = 1010 lines.

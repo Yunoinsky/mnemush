@@ -11,6 +11,7 @@
 //! within 30 days via `unsoft_delete`.
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use rusqlite::OptionalExtension;
 use serde::Serialize;
 
 use crate::config::Config;
@@ -88,10 +89,7 @@ pub fn on_edge_access(e: &mut Edge, cfg: &Config, now: DateTime<Utc>) {
 /// repeatedly fire on the same recurring failure, inflating the queue.
 /// Each processed pass reduces importance, so after a few sessions a
 /// repeated error fades out naturally via standard decay.
-pub fn process_needs_review(
-    store: &mut Store,
-    grace: ChronoDuration,
-) -> Result<usize> {
+pub fn process_needs_review(store: &mut Store, grace: ChronoDuration) -> Result<usize> {
     let now = Utc::now();
     let cutoff = (now - grace).timestamp();
 
@@ -104,7 +102,11 @@ pub fn process_needs_review(
     )?;
     let rows: Vec<(String, String, f32)> = stmt
         .query_map([cutoff], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, f32>(2)?))
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, f32>(2)?,
+            ))
         })?
         .collect::<rusqlite::Result<_>>()?;
 
@@ -133,7 +135,10 @@ pub fn process_needs_review(
             "needs_review_processed",
             Some(&id),
             None,
-            Some(&format!(r#"{{"category":"{}","importance_was":{}}}"#, category, importance)),
+            Some(&format!(
+                r#"{{"category":"{}","importance_was":{}}}"#,
+                category, importance
+            )),
             "background",
         )?;
         processed += 1;
@@ -148,15 +153,12 @@ pub fn process_needs_review(
 /// via `current_edge_strength`, and writes back. Writes are wrapped
 /// in a single transaction so partial failures don't half-decay the
 /// graph. Returns the number of rows updated.
-pub fn decay_all_edges(
-    store: &mut Store,
-    cfg: &Config,
-    now: DateTime<Utc>,
-) -> Result<usize> {
+pub fn decay_all_edges(store: &mut Store, cfg: &Config, now: DateTime<Utc>) -> Result<usize> {
     let mut stmt = store.conn.prepare(
         "SELECT id, strength, initial_strength, access_count, last_activated, stability, created_at
          FROM memory_edge WHERE deleted_at IS NULL",
     )?;
+    #[allow(clippy::type_complexity)]
     let rows: Vec<(String, f32, f32, u32, Option<i64>, f32, i64)> = stmt
         .query_map([], |r| {
             Ok((
@@ -178,7 +180,16 @@ pub fn decay_all_edges(
     let tx = store.conn.unchecked_transaction()?;
     let mut updated = 0usize;
     let now_ts = now.timestamp();
-    for (id, _strength, initial_strength, access_count, last_activated_ts, stability, created_at_ts) in rows {
+    for (
+        id,
+        _strength,
+        initial_strength,
+        access_count,
+        last_activated_ts,
+        stability,
+        created_at_ts,
+    ) in rows
+    {
         let edge_for_calc = Edge {
             id: id.clone(),
             source_id: String::new(),
@@ -191,11 +202,9 @@ pub fn decay_all_edges(
             evidence: None,
             context: None,
             access_count,
-            last_activated: last_activated_ts
-                .and_then(|t| DateTime::<Utc>::from_timestamp(t, 0)),
+            last_activated: last_activated_ts.and_then(|t| DateTime::<Utc>::from_timestamp(t, 0)),
             stability,
-            created_at: DateTime::<Utc>::from_timestamp(created_at_ts, 0)
-                .unwrap_or(now),
+            created_at: DateTime::<Utc>::from_timestamp(created_at_ts, 0).unwrap_or(now),
             deleted_at: None,
         };
         let new_strength = current_edge_strength(&edge_for_calc, cfg, now);
@@ -484,7 +493,17 @@ pub fn isolate_hard_delete(
         // FTS5 row orphaned, matching current soft_delete behavior.
         // A future `mneme vacuum` could rebuild memory_fts if orphans
         // become a problem.
+        // Keep the FTS5 index rowid-aligned: capture the rowid BEFORE
+        // deleting the memory row, then remove the orphaned FTS row.
+        // Without this, rowid reuse made search return wrong content.
+        // (2026-08-06 fix; see memory.rs reindex comment.)
+        let fts_rowid: Option<i64> = tx
+            .query_row("SELECT rowid FROM memory WHERE id = ?1", rusqlite::params![id], |r| r.get(0))
+            .optional()?;
         tx.execute("DELETE FROM memory WHERE id = ?1", rusqlite::params![id])?;
+        if let Some(rid) = fts_rowid {
+            tx.execute("DELETE FROM memory_fts WHERE rowid = ?1", rusqlite::params![rid])?;
+        }
         store.log_event_tx(
             &tx,
             "memory_hard_delete",
@@ -540,7 +559,6 @@ mod tests {
             claimed_by: None,
             parent_id: None,
             completed_at: None,
-
         }
     }
 
@@ -969,11 +987,9 @@ mod tests {
         // After 1 half-life (60 days) with no access, strength should be
         // ~0.5 * initial_strength (time decay factor), with the same
         // access_boost scaling as memory confidence.
-        let expected = (0.8 * 0.5 * (1.0 + 1.0_f32.ln() * c.forgetting.access_boost_factor)).clamp(0.0, 1.0);
-        assert!(
-            (s - expected).abs() < 0.05,
-            "expected ~{expected}, got {s}"
-        );
+        let expected =
+            (0.8 * 0.5 * (1.0 + 1.0_f32.ln() * c.forgetting.access_boost_factor)).clamp(0.0, 1.0);
+        assert!((s - expected).abs() < 0.05, "expected ~{expected}, got {s}");
     }
 
     #[test]
@@ -984,7 +1000,10 @@ mod tests {
         let used = edge(30, 0.5, 10);
         let s_unused = current_edge_strength(&unused, &c, now);
         let s_used = current_edge_strength(&used, &c, now);
-        assert!(s_used > s_unused, "used {s_used} should beat unused {s_unused}");
+        assert!(
+            s_used > s_unused,
+            "used {s_used} should beat unused {s_unused}"
+        );
     }
 
     #[test]
@@ -1082,16 +1101,15 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        let calc_old = current_edge_strength(
-            &edge(120, 0.8, 0),
-            &cfg(),
-            now,
-        );
+        let calc_old = current_edge_strength(&edge(120, 0.8, 0), &cfg(), now);
         assert!(
             (old_strength - calc_old).abs() < 0.01,
             "old: stored={old_strength} calc={calc_old}"
         );
-        assert!(old_strength < 0.4, "expected heavy decay, got {old_strength}");
+        assert!(
+            old_strength < 0.4,
+            "expected heavy decay, got {old_strength}"
+        );
 
         // Fresh edge: should be close to initial
         let fresh_strength: f32 = store
@@ -1102,16 +1120,15 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        let calc_fresh = current_edge_strength(
-            &edge(1, 0.6, 0),
-            &cfg(),
-            now,
-        );
+        let calc_fresh = current_edge_strength(&edge(1, 0.6, 0), &cfg(), now);
         assert!(
             (fresh_strength - calc_fresh).abs() < 0.01,
             "fresh: stored={fresh_strength} calc={calc_fresh}"
         );
-        assert!(fresh_strength > 0.55, "expected minimal decay, got {fresh_strength}");
+        assert!(
+            fresh_strength > 0.55,
+            "expected minimal decay, got {fresh_strength}"
+        );
     }
 
     #[test]
@@ -1170,7 +1187,10 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert!((dead_strength - 0.9).abs() < 0.001, "deleted row should not be touched");
+        assert!(
+            (dead_strength - 0.9).abs() < 0.001,
+            "deleted row should not be touched"
+        );
     }
 
     // ── process_needs_review tests ────────────────────────────────────────
@@ -1225,11 +1245,9 @@ mod tests {
         process_needs_review(&mut store, Duration::days(1)).unwrap();
         let imp: f32 = store
             .conn
-            .query_row(
-                "SELECT importance FROM memory WHERE id='err'",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT importance FROM memory WHERE id='err'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         // Started at 0.7, one pass downgrades by 0.1 → 0.6
         assert!(

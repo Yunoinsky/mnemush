@@ -137,7 +137,9 @@ fn handle(req: JsonRpcRequest, store: &Store, config: &Config) -> JsonRpcRespons
                 Some("memory_neighbors") => call_memory_neighbors(args, store, config, id),
                 Some("memory_reflect") => call_memory_reflect(args, store, config, id),
                 Some("mneme_status") => call_mneme_status(args, store, config, id),
-                Some("memory_save_search_result") => call_memory_save_search_result(args, store, config, id),
+                Some("memory_save_search_result") => {
+                    call_memory_save_search_result(args, store, config, id)
+                }
                 Some("memory_next") => call_memory_next(args, store, config, id),
                 Some("memory_frontier") => call_memory_frontier(args, store, config, id),
                 Some("memory_action_create") => call_memory_action_create(args, store, config, id),
@@ -356,7 +358,10 @@ fn range_error(field: &str, value: f64, min: f64, max: f64) -> Option<String> {
     if value < min || value > max || value.is_nan() {
         Some(format!(
             "{field} must be in [{min:.1}, {max:.1}] (got {value})",
-            field = field, min = min, max = max, value = value
+            field = field,
+            min = min,
+            max = max,
+            value = value
         ))
     } else {
         None
@@ -380,11 +385,13 @@ fn call_memory_add(p: Value, store: &Store, config: &Config, id: Value) -> JsonR
         None => Category::Note,
         Some(s) => match Category::parse(s) {
             Some(c) => c,
-            None => return JsonRpcResponse::err(
-                id,
-                -32602,
-                format!("unknown category: {:?} (see Category enum)", s),
-            ),
+            None => {
+                return JsonRpcResponse::err(
+                    id,
+                    -32602,
+                    format!("unknown category: {:?} (see Category enum)", s),
+                )
+            }
         },
     };
     let memory_type_str = p.get("memory_type").and_then(|v| v.as_str());
@@ -392,14 +399,16 @@ fn call_memory_add(p: Value, store: &Store, config: &Config, id: Value) -> JsonR
         None => MemoryType::Semantic,
         Some(s) => match MemoryType::parse(s) {
             Some(m) => m,
-            None => return JsonRpcResponse::err(
-                id,
-                -32602,
-                format!(
-                    "unknown memory_type: {:?} (must be one of semantic, procedural, identity)",
-                    s
-                ),
-            ),
+            None => {
+                return JsonRpcResponse::err(
+                    id,
+                    -32602,
+                    format!(
+                        "unknown memory_type: {:?} (must be one of semantic, procedural, identity)",
+                        s
+                    ),
+                )
+            }
         },
     };
     let importance_raw = p.get("importance").and_then(|v| v.as_f64()).unwrap_or(0.5);
@@ -520,11 +529,7 @@ fn call_memory_link(p: Value, store: &Store, config: &Config, id: Value) -> Json
             )
             .is_ok();
         if !src_ok {
-            return JsonRpcResponse::err(
-                id,
-                -32602,
-                format!("memory not found: {}", src),
-            );
+            return JsonRpcResponse::err(id, -32602, format!("memory not found: {}", src));
         }
         let tgt_ok = store
             .conn
@@ -535,11 +540,7 @@ fn call_memory_link(p: Value, store: &Store, config: &Config, id: Value) -> Json
             )
             .is_ok();
         if !tgt_ok {
-            return JsonRpcResponse::err(
-                id,
-                -32602,
-                format!("memory not found: {}", tgt),
-            );
+            return JsonRpcResponse::err(id, -32602, format!("memory not found: {}", tgt));
         }
         let edge_api = EdgeApi::new(store, config);
         match edge_api.link(src, tgt, edge_type, strength, None, None) {
@@ -585,19 +586,34 @@ fn call_mneme_status(_p: Value, store: &Store, config: &Config, id: Value) -> Js
         "SELECT COUNT(*) FROM memory WHERE deleted_at IS NULL",
         [],
         |r| r.get(0),
-    ) { Ok(n) => n, Err(e) => return json_err(id, e.to_string()) };
+    ) {
+        Ok(n) => n,
+        Err(e) => return json_err(id, e.to_string()),
+    };
     let soft_deleted: i64 = match store.conn.query_row(
         "SELECT COUNT(*) FROM memory WHERE deleted_at IS NOT NULL",
-        [], |r| r.get(0),
-    ) { Ok(n) => n, Err(e) => return json_err(id, e.to_string()) };
+        [],
+        |r| r.get(0),
+    ) {
+        Ok(n) => n,
+        Err(e) => return json_err(id, e.to_string()),
+    };
     let edges: i64 = match store.conn.query_row(
         "SELECT COUNT(*) FROM memory_edge WHERE deleted_at IS NULL",
-        [], |r| r.get(0),
-    ) { Ok(n) => n, Err(e) => return json_err(id, e.to_string()) };
+        [],
+        |r| r.get(0),
+    ) {
+        Ok(n) => n,
+        Err(e) => return json_err(id, e.to_string()),
+    };
     let needs_review: i64 = match store.conn.query_row(
         "SELECT COUNT(*) FROM memory WHERE needs_review=1 AND deleted_at IS NULL",
-        [], |r| r.get(0),
-    ) { Ok(n) => n, Err(e) => return json_err(id, e.to_string()) };
+        [],
+        |r| r.get(0),
+    ) {
+        Ok(n) => n,
+        Err(e) => return json_err(id, e.to_string()),
+    };
     let now = chrono::Utc::now();
     let prune_candidates = mneme::forget::prune_dry_run(store, config, now, None)
         .map(|v| v.len() as i64)
@@ -607,11 +623,10 @@ fn call_mneme_status(_p: Value, store: &Store, config: &Config, id: Value) -> Js
         .reflect_candidates(now, 7, 999)
         .map(|v| v.len() as i64)
         .unwrap_or(0);
-    let pending_proposals = mneme::identity::list_pending(Some(
-        mneme::identity::ProposalStatus::Pending,
-    ))
-    .map(|v| v.len() as i64)
-    .unwrap_or(0);
+    let pending_proposals =
+        mneme::identity::list_pending(Some(mneme::identity::ProposalStatus::Pending))
+            .map(|v| v.len() as i64)
+            .unwrap_or(0);
     json_ok(
         id,
         &json!({
@@ -633,7 +648,10 @@ fn call_memory_save_search_result(
     id: Value,
 ) -> JsonRpcResponse {
     let ids: Vec<String> = match p.get("ids").and_then(|v| v.as_array()) {
-        Some(arr) => arr.iter().filter_map(|v| v.as_str().map(String::from)).collect(),
+        Some(arr) => arr
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect(),
         None => return JsonRpcResponse::err(id, -32602, "missing ids"),
     };
     if ids.is_empty() {
@@ -649,11 +667,13 @@ fn call_memory_save_search_result(
         None => Category::Note,
         Some(s) => match Category::parse(s) {
             Some(c) => c,
-            None => return JsonRpcResponse::err(
-                id,
-                -32602,
-                format!("unknown category: {:?} (see Category enum)", s),
-            ),
+            None => {
+                return JsonRpcResponse::err(
+                    id,
+                    -32602,
+                    format!("unknown category: {:?} (see Category enum)", s),
+                )
+            }
         },
     };
     let importance_raw = p.get("importance").and_then(|v| v.as_f64()).unwrap_or(0.5);
@@ -707,12 +727,7 @@ fn call_memory_save_search_result(
     )
 }
 
-fn call_memory_next(
-    _p: Value,
-    _store: &Store,
-    _config: &Config,
-    id: Value,
-) -> JsonRpcResponse {
+fn call_memory_next(_p: Value, _store: &Store, _config: &Config, id: Value) -> JsonRpcResponse {
     use mneme::memory::MemoryApi;
     let api = MemoryApi::new(_store, _config);
     match api.memory_next() {
@@ -728,12 +743,7 @@ fn call_memory_next(
     }
 }
 
-fn call_memory_frontier(
-    p: Value,
-    _store: &Store,
-    _config: &Config,
-    id: Value,
-) -> JsonRpcResponse {
+fn call_memory_frontier(p: Value, _store: &Store, _config: &Config, id: Value) -> JsonRpcResponse {
     use mneme::memory::MemoryApi;
     let api = MemoryApi::new(_store, _config);
     let limit = p.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
@@ -753,7 +763,7 @@ fn call_memory_action_create(
     id: Value,
 ) -> JsonRpcResponse {
     use mneme::memory::MemoryApi;
-    use mneme::schema::{NewMemory, Category, Source, MemoryType, Tier};
+    use mneme::schema::{Category, MemoryType, NewMemory, Source, Tier};
     let title = match p.get("title").and_then(|v| v.as_str()) {
         Some(s) => s,
         None => return JsonRpcResponse::err(id, -32602, "missing title"),
@@ -828,10 +838,16 @@ fn call_memory_action_update(
             "active" => ActionStatus::Active,
             "completed" => ActionStatus::Completed,
             "abandoned" => ActionStatus::Abandoned,
-            _ => return JsonRpcResponse::err(
-                id, -32602,
-                format!("unknown status {:?} (must be active|completed|abandoned)", s),
-            ),
+            _ => {
+                return JsonRpcResponse::err(
+                    id,
+                    -32602,
+                    format!(
+                        "unknown status {:?} (must be active|completed|abandoned)",
+                        s
+                    ),
+                )
+            }
         };
     }
     if let Some(ts) = p.get("due_at").and_then(|v| v.as_i64()) {
@@ -871,7 +887,10 @@ fn call_identity_propose(p: Value, id: Value) -> JsonRpcResponse {
         Some(s) => s,
         None => return JsonRpcResponse::err(id, -32602, "missing reason"),
     };
-    let evidence = p.get("evidence_count").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
+    let evidence = p
+        .get("evidence_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1) as u32;
     match mneme::identity::propose(target, content, reason, evidence) {
         Ok(p) => json_ok(id, &p),
         Err(e) => json_err(id, e.to_string()),
@@ -885,7 +904,9 @@ fn call_identity_list_pending(p: Value, id: Value) -> JsonRpcResponse {
             "pending" => Some(mneme::identity::ProposalStatus::Pending),
             "approved" => Some(mneme::identity::ProposalStatus::Approved),
             "rejected" => Some(mneme::identity::ProposalStatus::Rejected),
-            other => return JsonRpcResponse::err(id, -32602, format!("unknown status '{}'", other)),
+            other => {
+                return JsonRpcResponse::err(id, -32602, format!("unknown status '{}'", other))
+            }
         }
     } else if all {
         None
@@ -907,13 +928,11 @@ fn call_identity_approve(p: Value, id: Value) -> JsonRpcResponse {
         Ok(Some(v)) => json_ok(id, &v),
         Ok(None) => match mneme::identity::find_proposal(mid) {
             Ok(Some(p)) => JsonRpcResponse::err(
-                id, -32602,
+                id,
+                -32602,
                 format!("proposal already {}", p.status.as_str()),
             ),
-            Ok(None) => JsonRpcResponse::err(
-                id, -32602,
-                format!("proposal not found: {mid}"),
-            ),
+            Ok(None) => JsonRpcResponse::err(id, -32602, format!("proposal not found: {mid}")),
             Err(e) => json_err(id, e.to_string()),
         },
         Err(e) => json_err(id, e.to_string()),
@@ -929,13 +948,11 @@ fn call_identity_reject(p: Value, id: Value) -> JsonRpcResponse {
         Ok(Some(v)) => json_ok(id, &v),
         Ok(None) => match mneme::identity::find_proposal(mid) {
             Ok(Some(p)) => JsonRpcResponse::err(
-                id, -32602,
+                id,
+                -32602,
                 format!("proposal already {}", p.status.as_str()),
             ),
-            Ok(None) => JsonRpcResponse::err(
-                id, -32602,
-                format!("proposal not found: {mid}"),
-            ),
+            Ok(None) => JsonRpcResponse::err(id, -32602, format!("proposal not found: {mid}")),
             Err(e) => json_err(id, e.to_string()),
         },
         Err(e) => json_err(id, e.to_string()),
@@ -989,9 +1006,16 @@ mod tests {
     fn range_error_helper_out_of_range() {
         range_error_picks_up_out_of_range();
     }
-    #[test] fn range_error_helper_negative() { assert!(range_error("strength", -0.1, 0.0, 1.0).is_some()); }
-    #[test] fn range_error_helper_nan() { assert!(range_error("importance", f64::NAN, 0.0, 1.0).is_some()); }
-    #[test] fn range_error_helper_boundary() {
+    #[test]
+    fn range_error_helper_negative() {
+        assert!(range_error("strength", -0.1, 0.0, 1.0).is_some());
+    }
+    #[test]
+    fn range_error_helper_nan() {
+        assert!(range_error("importance", f64::NAN, 0.0, 1.0).is_some());
+    }
+    #[test]
+    fn range_error_helper_boundary() {
         assert!(range_error("importance", 0.0, 0.0, 1.0).is_none());
         assert!(range_error("importance", 1.0, 0.0, 1.0).is_none());
         assert!(range_error("strength", 0.5, 0.0, 1.0).is_none());
@@ -999,7 +1023,8 @@ mod tests {
 
     // Identity tests — use isolated temp dir for each
     fn ok_text(r: &JsonRpcResponse) -> String {
-        r.result.as_ref()
+        r.result
+            .as_ref()
             .and_then(|v| v.get("content"))
             .and_then(|c| c.as_array())
             .and_then(|a| a.first())
@@ -1009,7 +1034,10 @@ mod tests {
             .unwrap_or_default()
     }
     fn err_msg(r: &JsonRpcResponse) -> String {
-        r.error.as_ref().map(|e| e.message.clone()).unwrap_or_default()
+        r.error
+            .as_ref()
+            .map(|e| e.message.clone())
+            .unwrap_or_default()
     }
     fn is_ok(r: &JsonRpcResponse) -> bool {
         r.error.is_none() && r.result.is_some()
@@ -1039,8 +1067,10 @@ mod tests {
             json!({"target": "USER.md", "content": "audit", "reason": "test", "evidence_count": 1}),
             serde_json::Value::Null,
         );
-        serde_json::from_str::<serde_json::Value>(&ok_text(&r))
-            .unwrap()["id"].as_str().unwrap().to_string()
+        serde_json::from_str::<serde_json::Value>(&ok_text(&r)).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
     }
 
     #[test]
@@ -1056,10 +1086,17 @@ mod tests {
         with_isolated_identity_dir(|| {
             let id = propose_one();
             let first = call_identity_approve(json!({"id": &id}), serde_json::Value::Null);
-            assert!(is_ok(&first), "first approve should succeed, got err={}", err_msg(&first));
+            assert!(
+                is_ok(&first),
+                "first approve should succeed, got err={}",
+                err_msg(&first)
+            );
             let second = call_identity_approve(json!({"id": &id}), serde_json::Value::Null);
             let msg = err_msg(&second);
-            assert!(msg.contains("already") && msg.contains("approved"), "msg: {msg}");
+            assert!(
+                msg.contains("already") && msg.contains("approved"),
+                "msg: {msg}"
+            );
         });
     }
 
@@ -1068,10 +1105,17 @@ mod tests {
         with_isolated_identity_dir(|| {
             let id = propose_one();
             let first = call_identity_reject(json!({"id": &id}), serde_json::Value::Null);
-            assert!(is_ok(&first), "first reject should succeed, got err={}", err_msg(&first));
+            assert!(
+                is_ok(&first),
+                "first reject should succeed, got err={}",
+                err_msg(&first)
+            );
             let second = call_identity_reject(json!({"id": &id}), serde_json::Value::Null);
             let msg = err_msg(&second);
-            assert!(msg.contains("already") && msg.contains("rejected"), "msg: {msg}");
+            assert!(
+                msg.contains("already") && msg.contains("rejected"),
+                "msg: {msg}"
+            );
         });
     }
 
@@ -1079,10 +1123,16 @@ mod tests {
     fn approve_after_reject_returns_clear_error() {
         with_isolated_identity_dir(|| {
             let id = propose_one();
-            assert!(is_ok(&call_identity_reject(json!({"id": &id}), serde_json::Value::Null)));
+            assert!(is_ok(&call_identity_reject(
+                json!({"id": &id}),
+                serde_json::Value::Null
+            )));
             let r = call_identity_approve(json!({"id": &id}), serde_json::Value::Null);
             let msg = err_msg(&r);
-            assert!(msg.contains("already") && msg.contains("rejected"), "msg: {msg}");
+            assert!(
+                msg.contains("already") && msg.contains("rejected"),
+                "msg: {msg}"
+            );
         });
     }
 
@@ -1150,7 +1200,10 @@ mod link_tests {
     }
 
     fn err_msg(r: &JsonRpcResponse) -> String {
-        r.error.as_ref().map(|e| e.message.clone()).unwrap_or_default()
+        r.error
+            .as_ref()
+            .map(|e| e.message.clone())
+            .unwrap_or_default()
     }
 }
 
@@ -1163,7 +1216,10 @@ mod unknown_value_tests {
         (Store::open_in_memory().unwrap(), Config::default())
     }
     fn err_msg(r: &JsonRpcResponse) -> String {
-        r.error.as_ref().map(|e| e.message.clone()).unwrap_or_default()
+        r.error
+            .as_ref()
+            .map(|e| e.message.clone())
+            .unwrap_or_default()
     }
 
     #[test]
@@ -1171,7 +1227,9 @@ mod unknown_value_tests {
         let (mut store, cfg) = setup();
         let r = call_memory_add(
             json!({"title":"t","content":"c","category":"bogus","importance":0.5}),
-            &mut store, &cfg, serde_json::Value::Null,
+            &store,
+            &cfg,
+            serde_json::Value::Null,
         );
         let msg = err_msg(&r);
         assert!(msg.contains("category"), "expected category in msg: {msg}");
@@ -1183,7 +1241,9 @@ mod unknown_value_tests {
         let (mut store, cfg) = setup();
         let r = call_memory_add(
             json!({"title":"t","content":"c","category":"note","memory_type":"bogus"}),
-            &mut store, &cfg, serde_json::Value::Null,
+            &store,
+            &cfg,
+            serde_json::Value::Null,
         );
         let msg = err_msg(&r);
         assert!(msg.contains("memory_type"), "msg: {msg}");
@@ -1225,10 +1285,15 @@ mod unknown_value_tests {
             .unwrap();
         let r = call_memory_link(
             json!({"source_id": src.id, "target_id": "00000000-0000-0000-0000-000000000000", "edge_type":"related"}),
-            &mut store, &cfg, serde_json::Value::Null,
+            &store,
+            &cfg,
+            serde_json::Value::Null,
         );
         let msg = err_msg(&r);
-        assert!(msg.contains("not found"), "expected 'not found' msg, got: {msg}");
+        assert!(
+            msg.contains("not found"),
+            "expected 'not found' msg, got: {msg}"
+        );
         assert!(!msg.contains("FOREIGN KEY"), "must not leak SQL: {msg}");
     }
 }
@@ -1242,7 +1307,10 @@ mod m1_default_tests {
         (Store::open_in_memory().unwrap(), Config::default())
     }
     fn err_msg(r: &JsonRpcResponse) -> String {
-        r.error.as_ref().map(|e| e.message.clone()).unwrap_or_default()
+        r.error
+            .as_ref()
+            .map(|e| e.message.clone())
+            .unwrap_or_default()
     }
     fn is_ok(r: &JsonRpcResponse) -> bool {
         r.error.is_none() && r.result.is_some()
@@ -1254,9 +1322,15 @@ mod m1_default_tests {
         let (mut store, cfg) = setup();
         let r = call_memory_add(
             json!({"title": "t", "content": "c"}),
-            &mut store, &cfg, serde_json::Value::Null,
+            &store,
+            &cfg,
+            serde_json::Value::Null,
         );
-        assert!(is_ok(&r), "missing category should default, got err: {}", err_msg(&r));
+        assert!(
+            is_ok(&r),
+            "missing category should default, got err: {}",
+            err_msg(&r)
+        );
     }
 
     /// Omitted memory_type must default to "semantic" (backwards compat).
@@ -1265,9 +1339,15 @@ mod m1_default_tests {
         let (mut store, cfg) = setup();
         let r = call_memory_add(
             json!({"title": "t", "content": "c", "category": "note"}),
-            &mut store, &cfg, serde_json::Value::Null,
+            &store,
+            &cfg,
+            serde_json::Value::Null,
         );
-        assert!(is_ok(&r), "missing memory_type should default, got err: {}", err_msg(&r));
+        assert!(
+            is_ok(&r),
+            "missing memory_type should default, got err: {}",
+            err_msg(&r)
+        );
     }
 
     /// Bogus category should reject (regression test for M-1).
@@ -1276,7 +1356,9 @@ mod m1_default_tests {
         let (mut store, cfg) = setup();
         let r = call_memory_add(
             json!({"title": "t", "content": "c", "category": "bogus"}),
-            &mut store, &cfg, serde_json::Value::Null,
+            &store,
+            &cfg,
+            serde_json::Value::Null,
         );
         assert!(!is_ok(&r));
         assert!(err_msg(&r).contains("bogus"));
@@ -1288,7 +1370,9 @@ mod m1_default_tests {
         let (mut store, cfg) = setup();
         let r = call_memory_add(
             json!({"title": "t", "content": "c", "category": "note", "memory_type": "bogus"}),
-            &mut store, &cfg, serde_json::Value::Null,
+            &store,
+            &cfg,
+            serde_json::Value::Null,
         );
         assert!(!is_ok(&r), "expected rejection, got {}", err_msg(&r));
         assert!(err_msg(&r).contains("memory_type"));
@@ -1302,15 +1386,13 @@ mod m1_default_tests {
     #[test]
     fn memory_next_empty_returns_envelope_not_bare_null() {
         let (mut store, cfg) = setup();
-        let r = call_memory_next(
-            json!({}),
-            &mut store, &cfg,
-            serde_json::Value::Null,
-        );
+        let r = call_memory_next(json!({}), &store, &cfg, serde_json::Value::Null);
         assert!(is_ok(&r), "expected ok, got error: {}", err_msg(&r));
         let v = r.result.as_ref().expect("result must be present");
         // Must have {content: [...]} shape, NOT bare null.
-        let content = v.get("content").and_then(|c| c.as_array())
+        let content = v
+            .get("content")
+            .and_then(|c| c.as_array())
             .expect("result must be wrapped in MCP content envelope");
         assert_eq!(content.len(), 1);
         let text = content[0].get("text").and_then(|t| t.as_str()).unwrap();

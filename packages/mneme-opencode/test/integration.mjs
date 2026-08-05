@@ -10,7 +10,7 @@ import os from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PLUGIN_PATH = "$HOME/Project/mneme/packages/mneme-opencode/dist/index.js";
+const PLUGIN_PATH = path.join(__dirname, "..", "dist", "index.js");
 
 // Track registered tools/hooks
 const registered = { tools: {}, hooks: {} };
@@ -35,7 +35,13 @@ process.env.MNEME_DATA_DIR = TMP_DATA;
 
 // MnemeClient.connect() in the plugin spawns mneme-mcp via PATH.
 // Make sure our locally-built binary is on PATH.
-const MNEME_MCP = "$HOME/.cargo/bin/mneme-mcp";
+// Resolve the freshly-built binary relative to the repo root
+// (packages/mneme-opencode/test -> repo root). Falls back to PATH.
+const MNEME_MCP = process.env.MNEME_BINARY
+  ?? path.join(__dirname, "..", "..", "..", "crates", "mneme", "target", "release",
+      `mneme-mcp${process.platform === "win32" ? ".exe" : ""}`);
+// Both the PATH and the client's MNEME_BINARY env must point at it.
+process.env.MNEME_BINARY = MNEME_MCP;
 process.env.PATH = `${path.dirname(MNEME_MCP)}:${process.env.PATH}`;
 
 let module;

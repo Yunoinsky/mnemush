@@ -37,9 +37,7 @@ impl Graph {
     pub fn load(store: &Store) -> Result<Graph> {
         let mems: Vec<Memory> = store
             .conn
-            .prepare(
-                "SELECT * FROM memory WHERE deleted_at IS NULL ORDER BY created_at ASC",
-            )?
+            .prepare("SELECT * FROM memory WHERE deleted_at IS NULL ORDER BY created_at ASC")?
             .query_map([], Store::row_to_memory)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         let index: HashMap<String, usize> = mems
@@ -57,7 +55,11 @@ impl Graph {
                 }
             }
         }
-        Ok(Graph { nodes: mems, index, out })
+        Ok(Graph {
+            nodes: mems,
+            index,
+            out,
+        })
     }
 
     /// Number of reachable nodes (non-zero degree).
@@ -79,9 +81,9 @@ pub fn pagerank(g: &Graph, damping: f64, max_iter: usize, tol: f64) -> Vec<f64> 
     let mut rank = vec![1.0 / n as f64; n];
     // Per-node out-degree (dedup'd neighbors count as links once).
     let mut out_deg = vec![0usize; n];
-    for i in 0..n {
+    for (i, out) in g.out.iter().enumerate() {
         let mut seen = std::collections::HashSet::new();
-        for &j in &g.out[i] {
+        for &j in out {
             if seen.insert(j) {
                 out_deg[i] += 1;
             }
@@ -148,8 +150,7 @@ pub fn label_propagation(g: &Graph, max_iter: usize) -> Vec<String> {
             // Most common; ties → smallest label (deterministic).
             let mut best: Option<&str> = None;
             let mut best_count = 0usize;
-            let mut entries: Vec<(usize, &str)> =
-                counts.iter().map(|(k, v)| (*v, *k)).collect();
+            let mut entries: Vec<(usize, &str)> = counts.iter().map(|(k, v)| (*v, *k)).collect();
             entries.sort_by(|a, b| {
                 b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)) // desc count, asc label
             });
@@ -183,7 +184,12 @@ fn esc_json(s: &str) -> String {
 }
 
 /// DOT export with an explicit edge list (see [`to_dot`]).
-pub fn export_dot(g: &Graph, edges: &[Edge], ranks: Option<&[f64]>, communities: Option<&[String]>) -> String {
+pub fn export_dot(
+    g: &Graph,
+    edges: &[Edge],
+    ranks: Option<&[f64]>,
+    communities: Option<&[String]>,
+) -> String {
     let mut s = String::from("digraph mneme {\n  rankdir=LR;\n");
     if let Some(com) = communities {
         let mut palette: HashMap<String, usize> = HashMap::new();
@@ -225,7 +231,11 @@ pub fn export_dot(g: &Graph, edges: &[Edge], ranks: Option<&[f64]>, communities:
             let style = if e.bidirectional { "dir=both" } else { "" };
             s.push_str(&format!(
                 "  \"{}\" -> \"{}\" [label=\"{}\", penwidth={:.1} {}];\n",
-                e.source_id, e.target_id, esc(e.edge_type.as_str()), pen, style
+                e.source_id,
+                e.target_id,
+                esc(e.edge_type.as_str()),
+                pen,
+                style
             ));
         }
     }
@@ -316,11 +326,16 @@ mod tests {
     use crate::schema::NewMemory;
 
     fn setup() -> (Store, crate::config::Config) {
-        (Store::open_in_memory().unwrap(), crate::config::Config::default())
+        (
+            Store::open_in_memory().unwrap(),
+            crate::config::Config::default(),
+        )
     }
 
     fn add(api: &MemoryApi, title: &str) -> String {
-        api.add(NewMemory::note(title, format!("content of {}", title))).unwrap().id
+        api.add(NewMemory::note(title, format!("content of {}", title)))
+            .unwrap()
+            .id
     }
 
     fn link(
@@ -386,8 +401,14 @@ mod tests {
         link(&edge, &a3, &b1, false, crate::schema::EdgeType::Related);
         let g = Graph::load(&store).unwrap();
         let labels = label_propagation(&g, 50);
-        let a_labels: Vec<&String> = [&a1, &a2, &a3].iter().map(|id| &labels[*g.index.get(*id).unwrap()]).collect();
-        let b_labels: Vec<&String> = [&b1, &b2, &b3].iter().map(|id| &labels[*g.index.get(*id).unwrap()]).collect();
+        let a_labels: Vec<&String> = [&a1, &a2, &a3]
+            .iter()
+            .map(|id| &labels[*g.index.get(*id).unwrap()])
+            .collect();
+        let b_labels: Vec<&String> = [&b1, &b2, &b3]
+            .iter()
+            .map(|id| &labels[*g.index.get(*id).unwrap()])
+            .collect();
         assert!(
             a_labels.iter().all(|l| *l == a_labels[0]),
             "community A should share one label, got {:?}",

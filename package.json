@@ -9,8 +9,9 @@
     "packages/mneme-opencode"
   ],
   "devDependencies": {
-    "typescript": "^5.4.0",
-    "@types/node": "^22.0.0"
+    "@types/node": "^22.0.0",
+    "typedoc": "^0.28.20",
+    "typescript": "^5.4.0"
   },
   "scripts": {
     "build:rust": "cargo build --release --manifest-path crates/mneme/Cargo.toml",
@@ -18,7 +19,10 @@
     "build": "npm run build:rust && npm run build:ts",
     "test:rust": "cargo test --manifest-path crates/mneme/Cargo.toml",
     "test:ts": "npm run test --workspaces --if-present",
-    "test": "npm run test:rust && npm run test:ts"
+    "test": "npm run test:rust && npm run test:ts",
+    "docs:rust": "cargo doc --manifest-path crates/mneme/Cargo.toml --no-deps --target-dir target/docs/rustdoc",
+    "docs:ts": "typedoc --out target/docs/tsdoc",
+    "docs": "npm run docs:rust && npm run docs:ts"
   },
   "license": "MulanPSL-2.0"
 }

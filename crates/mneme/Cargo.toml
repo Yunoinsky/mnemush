@@ -1,6 +1,6 @@
 [package]
 name = "mneme"
-version = "0.4.0"
+version = "1.0.0"
 edition = "2021"
 rust-version = "1.75"
 description = "Brain-inspired memory layer for AI coding agents"
@@ -39,6 +39,9 @@ uuid = { version = "1", features = ["v4", "v7", "serde"] }
 # Hashing
 sha2 = "0.10"
 hex = "0.4"
+
+# Embeddings (v1.0, opt-in)
+fastembed = "5"
 
 # Text processing
 regex = "1"

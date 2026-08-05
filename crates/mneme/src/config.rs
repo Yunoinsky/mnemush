@@ -20,6 +20,7 @@ pub struct Config {
     pub search: SearchConfig,
     pub storage: StorageConfig,
     pub eval: EvalConfig,
+    pub embedding: EmbeddingConfig,
     pub project: ProjectConfig,
 }
 
@@ -74,6 +75,21 @@ pub struct EdgeConfig {
     pub edge_decay_half_life_days: f32,
     pub max_neighbor_hops: usize,
     pub auto_link_enabled: bool,
+    /// Auto-merge near-duplicate snapshot-type memories (note / skill /
+    /// insight / episodic). When a NEW memory's content is Jaccard-similar
+    /// to an existing one at or above `auto_merge_min_sim`, the OLD one is
+    /// soft-deleted and its edges retargeted to the new one. This keeps
+    /// repeated captures of the same evolving document (e.g. a SKILL.md that
+    /// changes slightly between sessions) from piling up as near-duplicates
+    /// that exact-content-hash dedup can't catch.
+    ///
+    /// Distinct from supersede detection (Decision/Correction/Preference →
+    /// adds a Supersedes edge, doesn't merge). Merge is destructive-ish
+    /// (old memory soft-deleted, reversible) so it defaults to a stricter
+    /// similarity threshold than supersede.
+    pub auto_merge_enabled: bool,
+    /// Minimum Jaccard similarity for auto-merge. Higher = fewer merges.
+    pub auto_merge_min_sim: f32,
 }
 
 impl Default for EdgeConfig {
@@ -89,6 +105,8 @@ impl Default for EdgeConfig {
             edge_decay_half_life_days: 60.0,
             max_neighbor_hops: 2,
             auto_link_enabled: true,
+            auto_merge_enabled: true,
+            auto_merge_min_sim: 0.6,
         }
     }
 }
@@ -139,6 +157,7 @@ impl Default for StorageConfig {
 ///   - age alone leaves the count unbounded for heavy users
 ///   - count alone can keep ancient dead sessions
 ///   - size alone (lines per file) lets a single session dominate
+///
 /// Apply via `mneme eval prune [--apply]` or auto at session_end.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -165,6 +184,40 @@ impl Default for EvalConfig {
     }
 }
 
+/// Opt-in semantic-search layer (v1.0).
+///
+/// Off by default — search uses FTS5 + BM25 + importance scoring.
+/// When `enabled = true`, `memory_search` blends cosine similarity
+/// over a sentence-transformer embedding with the BM25 score
+/// (final = `bm25_weight * bm25 + embed_weight * cosine`).
+///
+/// `model`: passed to `fastembed`. Default =
+/// `sentence-transformers/all-MiniLM-L6-v2-q` (quantized MiniLM,
+/// 384-dim, ~25 MB, downloaded on first use to `~/.mneme/models/`).
+///
+/// `bm25_weight` / `embed_weight`: blend weights. Default 0.7 / 0.3
+/// favors the proven BM25 path while letting cosine break ties on
+/// semantic similarity.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EmbeddingConfig {
+    pub enabled: bool,
+    pub model: String,
+    pub bm25_weight: f32,
+    pub embed_weight: f32,
+}
+
+impl Default for EmbeddingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            model: crate::embeddings::DEFAULT_MODEL_ID.to_string(),
+            bm25_weight: 0.7,
+            embed_weight: 0.3,
+        }
+    }
+}
+
 /// Multi-project isolation (v0.4).
 ///
 /// `default_project`: when set, all writes (memory_add) are tagged
@@ -181,20 +234,11 @@ impl Default for EvalConfig {
 /// Backward compatibility: with both fields at defaults, behavior
 /// matches v0.3 (no project isolation). Setting `default_project` via
 /// env (`MNEME_PROJECT`) or config.toml is opt-in.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProjectConfig {
     pub default_project: Option<String>,
     pub cross_project_search: bool,
-}
-
-impl Default for ProjectConfig {
-    fn default() -> Self {
-        Self {
-            default_project: None,
-            cross_project_search: false,
-        }
-    }
 }
 
 impl Config {
@@ -275,7 +319,9 @@ impl Config {
             ));
         }
         if self.eval.max_session_files == 0 {
-            return Err(MnemeError::Config("eval.max_session_files must be > 0".into()));
+            return Err(MnemeError::Config(
+                "eval.max_session_files must be > 0".into(),
+            ));
         }
         Ok(())
     }

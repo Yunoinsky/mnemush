@@ -169,6 +169,19 @@ enum Cmd {
         #[command(subcommand)]
         action: GraphCmd,
     },
+    /// Cross-machine sync (v1.0) — Git as the transport, mneme as
+    /// the codec. Export the current DB state to a git repo, import
+    /// a repo's state back. Run `git push`/`pull` on the repo
+    /// yourself between machines.
+    Sync {
+        #[command(subcommand)]
+        action: SyncCmd,
+    },
+    /// Rebuild the FTS5 search index from the memory table. Fixes
+    /// rowid misalignment caused by historical soft/hard deletes
+    /// that left orphaned FTS rows (search returned wrong content).
+    /// Safe to run anytime; idempotent.
+    Reindex,
     /// Backup and restore the entire `~/.mneme/` data directory to a
     /// gzipped tar archive. Round-trip: a fresh `mneme restore` into
     /// an empty target dir restores every memory, identity file,
@@ -180,6 +193,20 @@ enum Cmd {
         /// Include the eval/ NDJSON log (regenerable, default off).
         #[arg(long)]
         include_eval: bool,
+    },
+    /// Embed all (or selected) memories with the configured model.
+    /// Requires `[embeddings] enabled = true`. First run downloads
+    /// the model (~25 MB) to `~/.mneme/models/`.
+    Embed {
+        /// Only embed memories matching this substring in the title
+        /// (case-insensitive). Default: every active memory.
+        #[arg(long)]
+        title_contains: Option<String>,
+        /// Skip if the memory already has an embedding for the
+        /// configured model (default: re-embed all). Use --force to
+        /// overwrite (e.g. after upgrading to a new model id).
+        #[arg(long)]
+        force: bool,
     },
     /// Restore a backup archive. Refuses to overwrite a target whose
     /// schema_version is newer than the backup (downgrade protection);
@@ -226,6 +253,7 @@ enum EvalCmd {
     ///      lines per file (drop oldest).
     ///   3. `max_session_files` (default 30) — keep the N most-recent
     ///      session files; delete the rest.
+    ///
     /// Dry-run by default; pass `--apply` to actually write. Auto-runs
     /// at session_end unless MNEME_EVAL_PRUNE_ON_SESSION_END=off.
     Prune {
@@ -276,6 +304,34 @@ enum GraphCmd {
 }
 
 #[derive(Subcommand)]
+enum SyncCmd {
+    /// `git init` the sync dir + write the current state as an
+    /// initial commit. Idempotent: re-running refreshes the
+    /// snapshot and amends the initial commit. Add a remote and
+    /// `git push` after this.
+    Init {
+        /// Sync directory (default: ~/mneme-sync).
+        #[arg(long, short = 'd')]
+        dir: Option<String>,
+    },
+    /// Write the current DB state to the sync dir (no git ops).
+    Export {
+        /// Sync directory (default: ~/mneme-sync).
+        #[arg(long, short = 'd')]
+        dir: Option<String>,
+    },
+    /// Import a sync dir's state into the local DB. Refuses
+    /// snapshots from a newer schema_version. Reports per-memory
+    /// conflicts (local updated_at newer than snapshot) but leaves
+    /// those rows untouched.
+    Import {
+        /// Sync directory.
+        #[arg(long, short = 'd')]
+        dir: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum IdentityCmd {
     /// Print the current USER.md / PERSONA.md / CONSTITUTION.md contents.
     Show,
@@ -309,9 +365,7 @@ enum IdentityCmd {
         id: String,
     },
     /// Reject a pending proposal — marked rejected, target file untouched.
-    Reject {
-        id: String,
-    },
+    Reject { id: String },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -403,7 +457,11 @@ fn main() -> anyhow::Result<()> {
                 None => println!("(not found)"),
             }
         }
-        Cmd::List { limit, category, all_projects } => {
+        Cmd::List {
+            limit,
+            category,
+            all_projects,
+        } => {
             let api = MemoryApi::new(&store, &config);
             // --all-projects bypasses MNEME_PROJECT isolation; we
             // call list_in_project with None so the filter doesn't
@@ -517,19 +575,24 @@ fn main() -> anyhow::Result<()> {
                 .reflect_candidates(now, 7, 999)
                 .map(|v| v.len() as i64)
                 .unwrap_or(0);
-            let pending_proposals = mneme::identity::list_pending(Some(
-                mneme::identity::ProposalStatus::Pending,
-            ))
-            .map(|v| v.len() as i64)
-            .unwrap_or(0);
+            let pending_proposals =
+                mneme::identity::list_pending(Some(mneme::identity::ProposalStatus::Pending))
+                    .map(|v| v.len() as i64)
+                    .unwrap_or(0);
             println!("mneme status");
             println!("  memories (active):    {}", active);
             println!("  memories (soft-del):  {}", soft_deleted);
             println!("  edges (active):       {}", edges);
             println!("  needs_review:         {}", needs_review);
-            println!("  prune candidates:     {} (matches should_prune)", prune_candidates);
+            println!(
+                "  prune candidates:     {} (matches should_prune)",
+                prune_candidates
+            );
             println!("  reflect candidates:   {} (last 7d)", reflect_n);
-            println!("  pending proposals:    {} (run `mneme identity list-pending`)", pending_proposals);
+            println!(
+                "  pending proposals:    {} (run `mneme identity list-pending`)",
+                pending_proposals
+            );
         }
         Cmd::EdgeDecay => {
             let config = mneme::config::Config::load()?;
@@ -558,7 +621,10 @@ fn main() -> anyhow::Result<()> {
                         "approved" => mneme::identity::ProposalStatus::Approved,
                         "rejected" => mneme::identity::ProposalStatus::Rejected,
                         other => {
-                            println!("unknown status '{}', expected pending|approved|rejected", other);
+                            println!(
+                                "unknown status '{}', expected pending|approved|rejected",
+                                other
+                            );
                             return Ok(());
                         }
                     })
@@ -567,8 +633,7 @@ fn main() -> anyhow::Result<()> {
                 } else {
                     Some(mneme::identity::ProposalStatus::Pending)
                 };
-                let proposals =
-                    mneme::identity::list_pending(status_filter).unwrap_or_default();
+                let proposals = mneme::identity::list_pending(status_filter).unwrap_or_default();
                 if proposals.is_empty() {
                     println!("(no {}proposals)", if all { "" } else { "pending " });
                     return Ok(());
@@ -601,24 +666,20 @@ fn main() -> anyhow::Result<()> {
                     short, target, short, short
                 );
             }
-            IdentityCmd::Approve { id } => {
-                match mneme::identity::approve(&id)? {
-                    Some(p) => {
-                        let short = if p.id.len() >= 8 { &p.id[..8] } else { &p.id };
-                        println!("approved #{} → appended to {}", short, p.target);
-                    }
-                    None => println!("(no pending proposal with id {})", &id[..id.len().min(8)]),
+            IdentityCmd::Approve { id } => match mneme::identity::approve(&id)? {
+                Some(p) => {
+                    let short = if p.id.len() >= 8 { &p.id[..8] } else { &p.id };
+                    println!("approved #{} → appended to {}", short, p.target);
                 }
-            }
-            IdentityCmd::Reject { id } => {
-                match mneme::identity::reject(&id)? {
-                    Some(p) => {
-                        let short = if p.id.len() >= 8 { &p.id[..8] } else { &p.id };
-                        println!("rejected #{} (was for {})", short, p.target);
-                    }
-                    None => println!("(no pending proposal with id {})", &id[..id.len().min(8)]),
+                None => println!("(no pending proposal with id {})", &id[..id.len().min(8)]),
+            },
+            IdentityCmd::Reject { id } => match mneme::identity::reject(&id)? {
+                Some(p) => {
+                    let short = if p.id.len() >= 8 { &p.id[..8] } else { &p.id };
+                    println!("rejected #{} (was for {})", short, p.target);
                 }
-            }
+                None => println!("(no pending proposal with id {})", &id[..id.len().min(8)]),
+            },
         },
         Cmd::Config => {
             println!("{:#?}", config);
@@ -675,16 +736,14 @@ fn main() -> anyhow::Result<()> {
                     for entry in std::fs::read_dir(&eval_dir)
                         .map_err(|e| mneme::error::MnemeError::Other(e.to_string()))?
                     {
-                        let entry = entry.map_err(|e| {
-                            mneme::error::MnemeError::Other(e.to_string())
-                        })?;
+                        let entry =
+                            entry.map_err(|e| mneme::error::MnemeError::Other(e.to_string()))?;
                         let path = entry.path();
                         if path.extension().and_then(|s| s.to_str()) != Some("ndjson") {
                             continue;
                         }
-                        let content = std::fs::read_to_string(&path).map_err(|e| {
-                            mneme::error::MnemeError::Other(e.to_string())
-                        })?;
+                        let content = std::fs::read_to_string(&path)
+                            .map_err(|e| mneme::error::MnemeError::Other(e.to_string()))?;
                         for line in content.lines() {
                             let line = line.trim();
                             if line.is_empty() {
@@ -705,9 +764,7 @@ fn main() -> anyhow::Result<()> {
                             if let Some(tool) = e.get("tool").and_then(|v| v.as_str()) {
                                 *by_tool.entry(tool.to_string()).or_default() += 1;
                             }
-                            if let Some(lat) =
-                                e.get("latency_ms").and_then(|v| v.as_u64())
-                            {
+                            if let Some(lat) = e.get("latency_ms").and_then(|v| v.as_u64()) {
                                 lats.push(lat);
                             }
                             if let Some(s) = e.get("session").and_then(|v| v.as_str()) {
@@ -719,21 +776,35 @@ fn main() -> anyhow::Result<()> {
                         println!("(no eval entries in the last {since})");
                         return Ok(());
                     }
-                    println!("self-eval (last {since}): {} total calls across {} session(s)",
-                             total, sessions.len());
+                    println!(
+                        "self-eval (last {since}): {} total calls across {} session(s)",
+                        total,
+                        sessions.len()
+                    );
                     println!();
                     lats.sort_unstable();
                     let p = |q: f64| -> u64 {
-                        if lats.is_empty() { 0 } else {
+                        if lats.is_empty() {
+                            0
+                        } else {
                             let i = ((lats.len() as f64 - 1.0) * q) as usize;
                             lats[i]
                         }
                     };
                     let p50 = p(0.50);
                     let p95 = p(0.95);
-                    println!("  latency:    p50={}ms  p95={}ms  (n={})", p50, p95, lats.len());
-                    println!("  errors:     {} / {} = {:.1}%",
-                             errors, total, 100.0 * errors as f64 / total as f64);
+                    println!(
+                        "  latency:    p50={}ms  p95={}ms  (n={})",
+                        p50,
+                        p95,
+                        lats.len()
+                    );
+                    println!(
+                        "  errors:     {} / {} = {:.1}%",
+                        errors,
+                        total,
+                        100.0 * errors as f64 / total as f64
+                    );
                     println!();
                     println!("  by tool:");
                     for (tool, count) in &by_tool {
@@ -750,16 +821,14 @@ fn main() -> anyhow::Result<()> {
                     for entry in std::fs::read_dir(&eval_dir)
                         .map_err(|e| mneme::error::MnemeError::Other(e.to_string()))?
                     {
-                        let entry = entry.map_err(|e| {
-                            mneme::error::MnemeError::Other(e.to_string())
-                        })?;
+                        let entry =
+                            entry.map_err(|e| mneme::error::MnemeError::Other(e.to_string()))?;
                         let path = entry.path();
                         if path.extension().and_then(|s| s.to_str()) != Some("ndjson") {
                             continue;
                         }
-                        let content = std::fs::read_to_string(&path).map_err(|e| {
-                            mneme::error::MnemeError::Other(e.to_string())
-                        })?;
+                        let content = std::fs::read_to_string(&path)
+                            .map_err(|e| mneme::error::MnemeError::Other(e.to_string()))?;
                         for line in content.lines() {
                             let line = line.trim();
                             if line.is_empty() {
@@ -815,9 +884,11 @@ fn main() -> anyhow::Result<()> {
                         println!("(graph is empty — add memories and link them first)");
                         return Ok(());
                     }
-                    let shown = idx
-                        .iter()
-                        .take(if top == 0 { idx.len() } else { top.min(idx.len()) });
+                    let shown = idx.iter().take(if top == 0 {
+                        idx.len()
+                    } else {
+                        top.min(idx.len())
+                    });
                     for &i in shown {
                         let m = &g.nodes[i];
                         println!("{:>7.4}  #{}  {}", ranks[i], &m.id[..8], m.title);
@@ -841,8 +912,12 @@ fn main() -> anyhow::Result<()> {
                             continue;
                         }
                         n += 1;
-                        println!("community {} ({}, {} member(s)):",
-                            n, &label[..8.min(label.len())], members.len());
+                        println!(
+                            "community {} ({}, {} member(s)):",
+                            n,
+                            &label[..8.min(label.len())],
+                            members.len()
+                        );
                         for &i in members {
                             let m = &g.nodes[i];
                             println!("    #{}  {}", &m.id[..8], m.title);
@@ -852,7 +927,12 @@ fn main() -> anyhow::Result<()> {
                         println!("(no communities with >= {} member(s))", min_members);
                     }
                 }
-                GraphCmd::Export { format, ranks, communities, output } => {
+                GraphCmd::Export {
+                    format,
+                    ranks,
+                    communities,
+                    output,
+                } => {
                     let edges = graph::load_edges(&store)?;
                     let ranks_opt = if ranks {
                         Some(graph::pagerank(&g, 0.85, 100, 1e-6))
@@ -865,7 +945,9 @@ fn main() -> anyhow::Result<()> {
                         None
                     };
                     let body = match format.as_str() {
-                        "dot" => graph::export_dot(&g, &edges, ranks_opt.as_deref(), com_opt.as_deref()),
+                        "dot" => {
+                            graph::export_dot(&g, &edges, ranks_opt.as_deref(), com_opt.as_deref())
+                        }
                         "json" => graph::export_d3(&g, &edges, com_opt.as_deref()),
                         other => {
                             println!("unknown format '{}' (expected dot|json)", other);
@@ -875,9 +957,7 @@ fn main() -> anyhow::Result<()> {
                     match output {
                         Some(path) => {
                             std::fs::write(&path, &body).map_err(|e| {
-                                mneme::error::MnemeError::Other(format!(
-                                    "write {}: {}", path, e
-                                ))
+                                mneme::error::MnemeError::Other(format!("write {}: {}", path, e))
                             })?;
                             println!("wrote {} ({} bytes)", path, body.len());
                         }
@@ -886,7 +966,83 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Cmd::Backup { output, include_eval } => {
+        Cmd::Reindex => {
+            // Rebuild the FTS5 index from the memory table. FTS rowid
+            // must equal memory rowid (search JOINs on it), so we
+            // insert ALL rows (incl. soft-deleted) to keep alignment.
+            let tx = store.conn.unchecked_transaction()?;
+            tx.execute("DELETE FROM memory_fts", [])?;
+            tx.execute(
+                "INSERT INTO memory_fts(rowid, title, content, context, tags) \
+                 SELECT rowid, title, content, context, tags FROM memory",
+                [],
+            )?;
+            tx.commit()?;
+            let n: i64 = store
+                .conn
+                .query_row("SELECT COUNT(*) FROM memory_fts", [], |r| r.get(0))?;
+            println!("reindexed memory_fts ({} rows)", n);
+        }
+        Cmd::Sync { action } => {
+            use mneme::sync;
+            match action {
+                SyncCmd::Init { dir } => {
+                    let dir = dir.map(std::path::PathBuf::from).unwrap_or_else(|| {
+                        std::env::var("HOME")
+                            .map(|h| std::path::PathBuf::from(h).join("mneme-sync"))
+                            .unwrap_or_else(|_| std::path::PathBuf::from("./mneme-sync"))
+                    });
+                    let m = sync::init_sync(&store, &dir)?;
+                    println!(
+                        "initialized {} ({} active memories, schema v{}, mneme {})",
+                        dir.display(),
+                        m.counts.active_memories,
+                        m.schema_version,
+                        m.mneme_version
+                    );
+                    println!(
+                        "next: `cd {} && git remote add origin <url> && git push -u origin main`",
+                        dir.display()
+                    );
+                }
+                SyncCmd::Export { dir } => {
+                    let dir = dir.map(std::path::PathBuf::from).unwrap_or_else(|| {
+                        std::env::var("HOME")
+                            .map(|h| std::path::PathBuf::from(h).join("mneme-sync"))
+                            .unwrap_or_else(|_| std::path::PathBuf::from("./mneme-sync"))
+                    });
+                    let m = sync::export_to(&store, &dir)?;
+                    println!(
+                        "exported {} ({} active memories, schema v{})",
+                        dir.display(),
+                        m.counts.active_memories,
+                        m.schema_version
+                    );
+                }
+                SyncCmd::Import { dir } => {
+                    let dir = std::path::PathBuf::from(&dir);
+                    let r = sync::import_from(&store, &dir)?;
+                    println!(
+                        "imported {} memories, {} edges, {} embeddings, {} identity file(s)",
+                        r.imported, r.edges_imported, r.embeddings_imported, r.identity_copied
+                    );
+                    if !r.conflicts.is_empty() {
+                        println!(
+                            "{} conflict(s) left untouched (local is newer):",
+                            r.conflicts.len()
+                        );
+                        for c in &r.conflicts {
+                            println!("  - {}", c);
+                        }
+                        println!("resolve manually (e.g. delete local copy and re-import).");
+                    }
+                }
+            }
+        }
+        Cmd::Backup {
+            output,
+            include_eval,
+        } => {
             let data_dir = mneme::default_data_dir();
             let out = match output {
                 Some(p) => std::path::PathBuf::from(p),
@@ -896,8 +1052,7 @@ fn main() -> anyhow::Result<()> {
                         .map(|d| d.as_secs())
                         .unwrap_or(0);
                     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-                    std::path::PathBuf::from(home)
-                        .join(format!("mneme-backup-{}.tar.gz", ts))
+                    std::path::PathBuf::from(home).join(format!("mneme-backup-{}.tar.gz", ts))
                 }
             };
             let meta = mneme::backup::create_backup_to(&data_dir, &out, include_eval)?;
@@ -909,7 +1064,12 @@ fn main() -> anyhow::Result<()> {
                 meta.counts.edges,
             );
         }
-        Cmd::Restore { input, target, yes, force } => {
+        Cmd::Restore {
+            input,
+            target,
+            yes,
+            force,
+        } => {
             let target_dir = match target {
                 Some(t) => std::path::PathBuf::from(t),
                 None => mneme::default_data_dir(),
@@ -923,24 +1083,100 @@ fn main() -> anyhow::Result<()> {
                 );
                 println!("Type 'yes' to continue, anything else to abort:");
                 let mut line = String::new();
-                std::io::stdin().read_line(&mut line).map_err(|e| {
-                    mneme::error::MnemeError::Other(format!("stdin: {}", e))
-                })?;
+                std::io::stdin()
+                    .read_line(&mut line)
+                    .map_err(|e| mneme::error::MnemeError::Other(format!("stdin: {}", e)))?;
                 if line.trim() != "yes" {
                     println!("aborted");
                     return Ok(());
                 }
             }
-            match mneme::backup::restore_backup_to(&archive, &target_dir, force) {
-                Ok(meta) => println!(
-                    "restored {} (schema_version={}, memories={}, edges={})",
-                    target_dir.display(),
-                    meta.schema_version,
-                    meta.counts.active_memories,
-                    meta.counts.edges,
-                ),
-                Err(e) => return Err(e.into()),
+            let meta = mneme::backup::restore_backup_to(&archive, &target_dir, force)?;
+            println!(
+                "restored {} (schema_version={}, memories={}, edges={})",
+                target_dir.display(),
+                meta.schema_version,
+                meta.counts.active_memories,
+                meta.counts.edges,
+            );
+        }
+        Cmd::Embed {
+            title_contains,
+            force,
+        } => {
+            let cfg = mneme::config::Config::load()?;
+            if !cfg.embedding.enabled {
+                println!(
+                    "[mneme] embeddings not enabled — set `[embeddings] enabled = true` \
+                     in ~/.mneme/config.toml."
+                );
+                return Ok(());
             }
+            let model = cfg.embedding.model.clone();
+            println!(
+                "[mneme] loading model {} (downloads on first run)...",
+                model
+            );
+            let mut emb = mneme::embeddings::Embedder::new(&model)?;
+            let api = mneme::memory::MemoryApi::new(&store, &cfg);
+            let mems = api.list(10_000)?;
+            let target: Vec<&mneme::schema::Memory> = mems
+                .iter()
+                .filter(|m| match &title_contains {
+                    Some(s) => m.title.to_lowercase().contains(&s.to_lowercase()),
+                    None => true,
+                })
+                .filter(|m| {
+                    if force {
+                        return true;
+                    }
+                    // Skip memories that already have an embedding for
+                    // this model. The `Result<Option<_>> → bool`
+                    // dance collapses to "true when the embedding
+                    // is absent".
+                    store
+                        .get_embedding(&m.id, emb.model_id())
+                        .ok()
+                        .flatten()
+                        .is_none()
+                })
+                .collect();
+            if target.is_empty() {
+                println!("(no matching memories)");
+                return Ok(());
+            }
+            let titles: Vec<&str> = target.iter().map(|m| m.title.as_str()).collect();
+            let contents: Vec<String> = target.iter().map(|m| m.content.clone()).collect();
+            let content_refs: Vec<&str> = contents.iter().map(String::as_str).collect();
+            // Embed title + content concatenated (best signal).
+            let joined: Vec<String> = target
+                .iter()
+                .map(|m| format!("{} {} {}", m.title, m.content, m.tags.join(" ")))
+                .collect();
+            let joined_refs: Vec<&str> = joined.iter().map(String::as_str).collect();
+            let _ = titles; // unused if we use joined
+            let _ = content_refs;
+            let vectors = emb.embed(&joined_refs)?;
+            let tx = store.conn.unchecked_transaction()?;
+            let mut count = 0usize;
+            for (mem, vec) in target.iter().zip(vectors.iter()) {
+                mneme::embeddings::put_embedding_tx(
+                    &tx,
+                    &mem.id,
+                    emb.model_id(),
+                    emb.dim() as i64,
+                    vec,
+                )?;
+                count += 1;
+            }
+            tx.commit()?;
+            println!(
+                "embedded {} memory(ies) with model {} ({}d, {} bytes each)",
+                count,
+                emb.model_id(),
+                emb.dim(),
+                emb.dim() * 4
+            );
         }
     }
     Ok(())

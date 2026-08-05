@@ -7,12 +7,12 @@
 //! recording the mneme version, schema_version, and live counts at
 //! backup time. Remaining entries are the live data files:
 //!
-//!   - `mneme.db`     — captured via SQLite's online backup API
-//!                      (handles WAL/SHM atomically)
-//!   - `config.toml`  — global config (if present)
-//!   - `identity/`    — USER/PERSONA/CONSTITUTION + pending.jsonl
-//!   - `eval/`        — self-eval NDJSON log (optional; can be skipped
-//!                      to keep backups small)
+//!   - `mneme.db` — captured via SQLite's online backup API (handles
+//!     WAL/SHM atomically)
+//!   - `config.toml` — global config (if present)
+//!   - `identity/` — USER/PERSONA/CONSTITUTION + pending.jsonl
+//!   - `eval/` — self-eval NDJSON log (optional; can be skipped to
+//!     keep backups small)
 //!
 //! Restore refuses to overwrite a target whose `schema_version` is
 //! newer than the backup's (downgrade protection). Callers must pass
@@ -76,28 +76,26 @@ pub fn snapshot_meta(store: &Store, source_dir: &Path) -> Result<BackupMeta> {
 }
 
 fn counts_for_store(store: &Store) -> Result<Counts> {
-    let active: i64 = store
-        .conn
-        .query_row(
-            "SELECT COUNT(*) FROM memory WHERE deleted_at IS NULL",
-            [],
-            |r| r.get(0),
-        )?;
-    let soft_deleted: i64 = store
-        .conn
-        .query_row(
-            "SELECT COUNT(*) FROM memory WHERE deleted_at IS NOT NULL",
-            [],
-            |r| r.get(0),
-        )?;
-    let edges: i64 = store
-        .conn
-        .query_row(
-            "SELECT COUNT(*) FROM memory_edge WHERE deleted_at IS NULL",
-            [],
-            |r| r.get(0),
-        )?;
-    Ok(Counts { active_memories: active, edges, soft_deleted })
+    let active: i64 = store.conn.query_row(
+        "SELECT COUNT(*) FROM memory WHERE deleted_at IS NULL",
+        [],
+        |r| r.get(0),
+    )?;
+    let soft_deleted: i64 = store.conn.query_row(
+        "SELECT COUNT(*) FROM memory WHERE deleted_at IS NOT NULL",
+        [],
+        |r| r.get(0),
+    )?;
+    let edges: i64 = store.conn.query_row(
+        "SELECT COUNT(*) FROM memory_edge WHERE deleted_at IS NULL",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(Counts {
+        active_memories: active,
+        edges,
+        soft_deleted,
+    })
 }
 
 fn schema_version(store: &Store) -> Result<i64> {
@@ -179,11 +177,7 @@ fn append_manifest<W: Write>(tar: &mut tar::Builder<W>, meta: &BackupMeta) -> Re
     Ok(())
 }
 
-fn append_if_exists<W: Write>(
-    tar: &mut tar::Builder<W>,
-    root: &Path,
-    rel: &str,
-) -> Result<()> {
+fn append_if_exists<W: Write>(tar: &mut tar::Builder<W>, root: &Path, rel: &str) -> Result<()> {
     let path = root.join(rel);
     if path.exists() {
         tar.append_path_with_name(&path, rel)?;
@@ -191,11 +185,7 @@ fn append_if_exists<W: Write>(
     Ok(())
 }
 
-fn append_dir_if_exists<W: Write>(
-    tar: &mut tar::Builder<W>,
-    root: &Path,
-    rel: &str,
-) -> Result<()> {
+fn append_dir_if_exists<W: Write>(tar: &mut tar::Builder<W>, root: &Path, rel: &str) -> Result<()> {
     let path = root.join(rel);
     if !path.exists() {
         return Ok(());
@@ -227,11 +217,10 @@ pub fn restore_backup_to(
                 rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
             );
             if let Ok(conn) = conn {
-                let cur: rusqlite::Result<i64> = conn.query_row(
-                    "SELECT version FROM schema_version LIMIT 1",
-                    [],
-                    |r| r.get(0),
-                );
+                let cur: rusqlite::Result<i64> =
+                    conn.query_row("SELECT version FROM schema_version LIMIT 1", [], |r| {
+                        r.get(0)
+                    });
                 if let Ok(cur) = cur {
                     if cur > meta.schema_version {
                         return Err(MnemeError::Other(format!(
@@ -315,7 +304,6 @@ fn safe_join(root: &Path, entry_path: &Path) -> Result<std::path::PathBuf> {
     Ok(root.join(entry_path))
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,8 +320,7 @@ mod tests {
         let cfg = Config::default();
         let api = crate::memory::MemoryApi::new(&store, &cfg);
         api.add(NewMemory::note("alpha", "first memory")).unwrap();
-        api.add(NewMemory::note("beta", "second memory"))
-            .unwrap();
+        api.add(NewMemory::note("beta", "second memory")).unwrap();
         // Touch identity dir.
         std::fs::create_dir_all(tmp.path().join(IDENTITY_DIR)).unwrap();
         std::fs::write(tmp.path().join(IDENTITY_DIR).join("USER.md"), "user test").unwrap();
@@ -348,7 +335,7 @@ mod tests {
         let src = setup_home();
         let archive = src.path().join("backup.tar.gz");
         let meta_before = {
-            let store = Store::open(&src.path().join(DB_FILE)).unwrap();
+            let store = Store::open(src.path().join(DB_FILE)).unwrap();
             let m = snapshot_meta(&store, src.path()).unwrap();
             assert_eq!(m.counts.active_memories, 2);
             assert!(m.schema_version >= 3);
@@ -366,11 +353,16 @@ mod tests {
         assert_eq!(meta_before.counts, meta_after.counts);
         assert_eq!(meta_before.mneme_version, meta_after.mneme_version);
         // Both memories present after restore.
-        let store = Store::open(&dst.path().join(DB_FILE)).unwrap();
+        let store = Store::open(dst.path().join(DB_FILE)).unwrap();
         let cfg = Config::default();
         let api = crate::memory::MemoryApi::new(&store, &cfg);
         let mems = api.list(10).unwrap();
-        assert_eq!(mems.len(), 2, "expected 2 memories after restore, got {}", mems.len());
+        assert_eq!(
+            mems.len(),
+            2,
+            "expected 2 memories after restore, got {}",
+            mems.len()
+        );
         // Identity file restored.
         let user = std::fs::read_to_string(dst.path().join(IDENTITY_DIR).join("USER.md")).unwrap();
         assert_eq!(user, "user test");
@@ -394,9 +386,10 @@ mod tests {
         let dst = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dst.path()).unwrap();
         {
-            let _ = Store::open(&dst.path().join(DB_FILE)).unwrap();
+            let _ = Store::open(dst.path().join(DB_FILE)).unwrap();
             let conn = rusqlite::Connection::open(dst.path().join(DB_FILE)).unwrap();
-            conn.execute("UPDATE schema_version SET version = 99", []).unwrap();
+            conn.execute("UPDATE schema_version SET version = 99", [])
+                .unwrap();
         }
         let r = restore_backup_to(&archive, dst.path(), /*allow_downgrade=*/ false);
         assert!(r.is_err(), "should refuse downgrade, got {:?}", r);

@@ -318,7 +318,7 @@ export class MnemeClient {
     await this.rpc("initialize", {
       protocolVersion: "2024-11-05",
       capabilities: {},
-      clientInfo: { name: "mneme-client", version: "0.4.0" },
+      clientInfo: { name: "mneme-client", version: "1.0.0" },
     });
     // Fire-and-forget notification.
     this.notify("notifications/initialized", {});
@@ -628,14 +628,15 @@ export function findMnemeBinary(): string | null {
     return process.env.MNEME_BINARY;
   }
   const home = homedir();
+  const exe = process.platform === "win32" ? ".exe" : "";
   const candidates = [
-    join(home, ".cargo", "bin", "mneme-mcp"),
-    "/usr/local/bin/mneme-mcp",
-    "/opt/homebrew/bin/mneme-mcp",
-    "./target/release/mneme-mcp",
-    "./target/debug/mneme-mcp",
-    "./crates/mneme/target/release/mneme-mcp",
-    "./crates/mneme/target/debug/mneme-mcp",
+    join(home, ".cargo", "bin", `mneme-mcp${exe}`),
+    "/usr/local/bin/mneme-mcp" + exe,
+    "/opt/homebrew/bin/mneme-mcp" + exe,
+    "./target/release/mneme-mcp" + exe,
+    "./target/debug/mneme-mcp" + exe,
+    "./crates/mneme/target/release/mneme-mcp" + exe,
+    "./crates/mneme/target/debug/mneme-mcp" + exe,
   ];
   for (const c of candidates) {
     if (existsSync(c)) return c;

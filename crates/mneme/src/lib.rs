@@ -1,4 +1,6 @@
 // Copyright (c) 2026 Yunoinsky Chen
+#![warn(missing_docs)]
+#![warn(rustdoc::broken_intra_doc_links)]
 // Licensed under Mulan Permissive Software License, Version 2 (Mulan PSL v2).
 
 //! Mneme — brain-inspired memory layer for AI coding agents.
@@ -15,6 +17,7 @@
 pub mod backup;
 pub mod config;
 pub mod edge;
+pub mod embeddings;
 pub mod error;
 pub mod eval;
 pub mod forget;
@@ -25,6 +28,7 @@ pub mod migrations;
 pub mod scanner;
 pub mod schema;
 pub mod store;
+pub mod sync;
 
 pub use error::{MnemeError, Result};
 pub use schema::{

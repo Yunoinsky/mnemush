@@ -176,7 +176,13 @@ pub fn propose(
     reason: &str,
     evidence_count: u32,
 ) -> Result<PendingUpdate> {
-    propose_in(&default_identity_dir(), target, content, reason, evidence_count)
+    propose_in(
+        &default_identity_dir(),
+        target,
+        content,
+        reason,
+        evidence_count,
+    )
 }
 
 /// Read all proposals from `pending.jsonl`. Skips malformed lines (a
@@ -205,10 +211,7 @@ pub fn list_pending_in(dir: &Path, status: Option<ProposalStatus>) -> Result<Vec
             Err(e) => {
                 // ponytail: skip corrupted lines rather than crash the
                 // whole list. Operators can `cat pending.jsonl` to inspect.
-                eprintln!(
-                    "[mneme] skipping malformed pending.jsonl line: {}",
-                    e
-                );
+                eprintln!("[mneme] skipping malformed pending.jsonl line: {}", e);
             }
         }
     }
@@ -231,14 +234,15 @@ pub fn find_proposal_in(dir: &Path, id: &str) -> Result<Option<PendingUpdate>> {
     let content = std::fs::read_to_string(&path)?;
     let mut found: Option<PendingUpdate> = None;
     for line in content.lines() {
-        if line.trim().is_empty() { continue; }
+        if line.trim().is_empty() {
+            continue;
+        }
         let p: PendingUpdate = match serde_json::from_str(line) {
             Ok(p) => p,
             Err(_) => continue,
         };
         // Same prefix-match rule as resolve_in (>= 4 chars).
-        let matches = p.id == id
-            || (id.len() >= 4 && p.id.starts_with(id));
+        let matches = p.id == id || (id.len() >= 4 && p.id.starts_with(id));
         if matches {
             found = Some(p);
         }
@@ -420,8 +424,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // Pre-seed USER.md with some content
         fs::write(dir.path().join(USER_FILE), "name: A\n").unwrap();
-        let p = propose_in(dir.path(), USER_FILE, "researcher in CS", "user said it 3x", 3)
-            .unwrap();
+        let p = propose_in(
+            dir.path(),
+            USER_FILE,
+            "researcher in CS",
+            "user said it 3x",
+            3,
+        )
+        .unwrap();
         let resolved = approve_in(dir.path(), &p.id).unwrap().unwrap();
         assert_eq!(resolved.status, ProposalStatus::Approved);
         assert!(resolved.resolved_at.is_some());
@@ -429,7 +439,10 @@ mod tests {
         let user_md = fs::read_to_string(dir.path().join(USER_FILE)).unwrap();
         assert!(user_md.contains("name: A"), "original content preserved");
         assert!(user_md.contains("researcher in CS"), "proposal appended");
-        assert!(user_md.contains("user said it 3x"), "reason recorded in section");
+        assert!(
+            user_md.contains("user said it 3x"),
+            "reason recorded in section"
+        );
     }
 
     #[test]

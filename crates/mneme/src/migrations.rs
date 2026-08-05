@@ -61,9 +61,8 @@ impl Migration for V1ToV2 {
         for sql in alters {
             let col = column_name_from_add(sql).unwrap_or("");
             if !has_column(tx, col)? {
-                tx.execute_batch(sql).map_err(|e| {
-                    MnemeError::Other(format!("migration v1->v2: {}", e))
-                })?;
+                tx.execute_batch(sql)
+                    .map_err(|e| MnemeError::Other(format!("migration v1->v2: {}", e)))?;
             }
         }
         tx.execute_batch(
@@ -94,11 +93,26 @@ impl Migration for V2ToV3 {
         for sql in alters {
             let col = column_name_from_add(sql).unwrap_or("");
             if !has_column(tx, col)? {
-                tx.execute_batch(sql).map_err(|e| {
-                    MnemeError::Other(format!("migration v2->v3: {}", e))
-                })?;
+                tx.execute_batch(sql)
+                    .map_err(|e| MnemeError::Other(format!("migration v2->v3: {}", e)))?;
             }
         }
+        Ok(())
+    }
+}
+
+/// v0.3 → v0.4: add the `memory_embedding` table for opt-in semantic
+/// search. No columns added to `memory` itself; embeddings live in
+/// a separate table so on-disk size cost is zero for users who
+/// don't enable `[embeddings]`. Idempotent via `IF NOT EXISTS`.
+pub struct V3ToV4;
+impl Migration for V3ToV4 {
+    fn target_version(&self) -> i64 {
+        4
+    }
+    fn up(&self, tx: &Transaction) -> Result<()> {
+        tx.execute_batch(crate::embeddings::V3_TO_V4_SQL)
+            .map_err(|e| MnemeError::Other(format!("migration v3->v4: {}", e)))?;
         Ok(())
     }
 }
@@ -106,7 +120,7 @@ impl Migration for V2ToV3 {
 /// All known migrations, in order. Append new entries here when
 /// bumping `SCHEMA_VERSION`; no other code needs to change.
 pub fn default_registry() -> Vec<Box<dyn Migration>> {
-    vec![Box::new(V1ToV2), Box::new(V2ToV3)]
+    vec![Box::new(V1ToV2), Box::new(V2ToV3), Box::new(V3ToV4)]
 }
 
 fn column_name_from_add(sql: &str) -> Option<&str> {
@@ -162,11 +176,8 @@ mod tests {
         conn.execute_batch(crate::store::SCHEMA_SQL).unwrap();
         // Fake schema_version = 1 so all migrations will run.
         conn.execute("DELETE FROM schema_version", []).unwrap();
-        conn.execute(
-            "INSERT INTO schema_version (version) VALUES (1)",
-            [],
-        )
-        .unwrap();
+        conn.execute("INSERT INTO schema_version (version) VALUES (1)", [])
+            .unwrap();
         let tx = conn.transaction().unwrap();
         for m in default_registry() {
             m.up(&tx).unwrap();

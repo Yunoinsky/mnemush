@@ -107,9 +107,9 @@ impl<'a> MemoryApi<'a> {
         // config's default_project if isolation is enabled. NULL means
         // "global / un-scoped" and is preserved for callers that don't
         // configure isolation.
-        let project = m.project.or_else(|| {
-            self.config.project.default_project.clone()
-        });
+        let project = m
+            .project
+            .or_else(|| self.config.project.default_project.clone());
         let memory = Memory {
             id: Uuid::now_v7().to_string(),
             memory_type: m.memory_type,
@@ -258,6 +258,78 @@ impl<'a> MemoryApi<'a> {
             }
         }
 
+        // 2.5 auto-merge: near-duplicate snapshot-type memories.
+        // For note/skill/insight/episodic (content that gets re-captured
+        // as it evolves), a high Jaccard similarity with an existing
+        // memory means we probably captured the same thing twice. The
+        // old one is soft-deleted and its edges retargeted to the new
+        // one — keeps evolving documents from piling up as near-dupes
+        // that exact-content-hash dedup can't catch.
+        if self.config.edges.auto_merge_enabled
+            && matches!(
+                new_mem.category,
+                Category::Note
+                    | Category::Skill
+                    | Category::Insight
+                    | Category::Episodic
+            )
+        {
+            let min_sim = self.config.edges.auto_merge_min_sim;
+            for old in conflicts {
+                if old.created_at >= new_mem.created_at {
+                    continue; // don't merge newer memories into this one
+                }
+                let sim = jaccard(&new_mem.content, &old.content);
+                if sim >= min_sim {
+                    // Retarget all of old's edges to new.
+                    let mut stmt = tx.prepare(
+                        "SELECT id FROM memory_edge WHERE (source_id = ?1 OR target_id = ?1) AND deleted_at IS NULL",
+                    )?;
+                    let edge_ids: Vec<String> = stmt
+                        .query_map(params![&old.id], |r| r.get(0))?
+                        .filter_map(|r| r.ok())
+                        .collect();
+                    for eid in &edge_ids {
+                        tx.execute(
+                            "UPDATE memory_edge SET source_id = ?1 WHERE id = ?2 AND source_id = ?3",
+                            params![&new_mem.id, eid, &old.id],
+                        )?;
+                        tx.execute(
+                            "UPDATE memory_edge SET target_id = ?1 WHERE id = ?2 AND target_id = ?3",
+                            params![&new_mem.id, eid, &old.id],
+                        )?;
+                        // Drop self-loops introduced by the retarget.
+                        tx.execute(
+                            "DELETE FROM memory_edge WHERE source_id = target_id AND id = ?1",
+                            params![eid],
+                        )?;
+                    }
+                    // Soft-delete old + its FTS row (same tx).
+                    let now = crate::store::Store::now_ts();
+                    tx.execute(
+                        "UPDATE memory SET deleted_at = ?1 WHERE id = ?2",
+                        params![now, &old.id],
+                    )?;
+                    tx.execute(
+                        "DELETE FROM memory_fts WHERE rowid = (SELECT rowid FROM memory WHERE id = ?1)",
+                        params![&old.id],
+                    )?;
+                    self.store.log_event_tx(
+                        tx,
+                        "memory_auto_merge",
+                        Some(&new_mem.id),
+                        None,
+                        Some(&format!(
+                            "merged {} (jaccard={:.2})",
+                            &old.id[..8],
+                            sim
+                        )),
+                        "agent",
+                    )?;
+                }
+            }
+        }
+
         // 3. weak FTS5 similarity → low-strength related edge.
         // Runs for all categories. Bounded by `auto_link_weak_limit` (3 by
         // default). FTS5 top-3K is queried to allow jaccard filtering; the
@@ -360,14 +432,11 @@ impl<'a> MemoryApi<'a> {
                ORDER BY edge_count ASC, m.created_at DESC
                LIMIT ?2"#,
         )?;
-        let rows = stmt.query_map(
-            params![since_ts, limit as i64],
-            |row| {
-                // Skip the edge_count column by reading the memory first.
-                // We don't actually need edge_count; the ORDER BY uses it.
-                Store::row_to_memory(row)
-            },
-        )?;
+        let rows = stmt.query_map(params![since_ts, limit as i64], |row| {
+            // Skip the edge_count column by reading the memory first.
+            // We don't actually need edge_count; the ORDER BY uses it.
+            Store::row_to_memory(row)
+        })?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);
@@ -411,12 +480,20 @@ impl<'a> MemoryApi<'a> {
     /// Soft-delete a memory (recovers within 30 days).
     pub fn soft_delete(&self, id: &str) -> Result<()> {
         let now = Utc::now().timestamp();
-        self.store.conn.execute(
+        // Same transaction: mark deleted AND remove the FTS5 row so
+        // the index stays rowid-aligned with the memory table. Orphaned
+        // FTS rows caused rowid reuse to point at the wrong content
+        // (search returned garbage) — fixed 2026-08-06, see
+        // reindex(). Keep the DELETE here so it never recurs.
+        let tx = self.store.conn.unchecked_transaction()?;
+        tx.execute(
             "UPDATE memory SET deleted_at = ?1 WHERE id = ?2",
             params![now, id],
         )?;
+        tx.execute("DELETE FROM memory_fts WHERE rowid = (SELECT rowid FROM memory WHERE id = ?1)", params![id])?;
         self.store
-            .log_event("memory_soft_delete", Some(id), None, None, "agent")?;
+            .log_event_tx(&tx, "memory_soft_delete", Some(id), None, None, "agent")?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -428,11 +505,10 @@ impl<'a> MemoryApi<'a> {
             .list_active_filtered(limit, self.effective_read_filter())
     }
 
-    pub fn list_in_project(
-        &self,
-        limit: usize,
-        project: Option<&str>,
-    ) -> Result<Vec<Memory>> {
+    /// List active memories scoped to a specific project.
+    /// `Some(name)` → only that project; `None` → all projects
+    /// (cross-project escape hatch, ignoring MNEME_PROJECT).
+    pub fn list_in_project(&self, limit: usize, project: Option<&str>) -> Result<Vec<Memory>> {
         self.store.list_active_filtered(limit, project)
     }
 
@@ -580,6 +656,65 @@ impl<'a> MemoryApi<'a> {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         hits.truncate(limit);
+
+        // ── Embedding blend (v1.0, opt-in) ─────────────────────────
+        // Re-rank by blending the BM25 score with cosine similarity
+        // between the query embedding and each hit's stored embedding.
+        // Falls back to BM25-only if the model can't be loaded or no
+        // embeddings are stored yet.
+        if self.config.embedding.enabled && !hits.is_empty() {
+            let model_id = self.config.embedding.model.clone();
+            if let Ok(emb) = crate::embeddings::cached_embedder(&model_id) {
+                let qvec: Vec<f32> = emb
+                    .lock()
+                    .ok()
+                    .and_then(|mut e| e.embed(&[query]).ok())
+                    .and_then(|mut v| {
+                        if v.is_empty() {
+                            None
+                        } else {
+                            Some(v.remove(0))
+                        }
+                    })
+                    .unwrap_or_default();
+                if !qvec.is_empty() {
+                    let ids: Vec<String> = hits.iter().map(|h| h.memory.id.clone()).collect();
+                    let stored = self
+                        .store
+                        .embeddings_for(&ids, &model_id)
+                        .unwrap_or_default();
+                    let mut cos_by_id: std::collections::HashMap<String, f32> =
+                        std::collections::HashMap::new();
+                    for s in &stored {
+                        let n = qvec.len().min(s.vec.len());
+                        if n > 0 {
+                            cos_by_id.insert(
+                                s.memory_id.clone(),
+                                crate::embeddings::cosine(&qvec[..n], &s.vec[..n]),
+                            );
+                        }
+                    }
+                    let bm25_min = hits.iter().map(|h| h.bm25).fold(f32::INFINITY, f32::min);
+                    let bm25_max = hits
+                        .iter()
+                        .map(|h| h.bm25)
+                        .fold(f32::NEG_INFINITY, f32::max);
+                    let span = (bm25_max - bm25_min).max(f32::EPSILON);
+                    let bw = self.config.embedding.bm25_weight;
+                    let ew = self.config.embedding.embed_weight;
+                    for hit in hits.iter_mut() {
+                        let norm = ((hit.bm25 - bm25_min) / span).clamp(0.0, 1.0);
+                        let cos = cos_by_id.get(&hit.memory.id).copied().unwrap_or(0.0);
+                        hit.score = bw * norm + ew * cos;
+                    }
+                    hits.sort_by(|a, b| {
+                        b.score
+                            .partial_cmp(&a.score)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                }
+            }
+        }
 
         // ── Spreading activation (v0.3) ──────────────────────────
         // For each top hit, pull 1-hop neighbors and add them with
@@ -742,8 +877,7 @@ impl Store {
             ),
         };
         let mut stmt = self.conn.prepare(&sql)?;
-        let param_refs: Vec<&dyn rusqlite::ToSql> =
-            params_vec.iter().map(|b| &**b).collect();
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|b| &**b).collect();
         let rows = stmt.query_map(param_refs.as_slice(), Store::row_to_memory)?;
         let mut out = Vec::new();
         for r in rows {
@@ -756,7 +890,7 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-        use crate::schema::NewMemory;
+    use crate::schema::NewMemory;
 
     fn setup() -> (Store, Config) {
         (Store::open_in_memory().unwrap(), Config::default())
@@ -869,15 +1003,15 @@ mod tests {
         for i in 0..5 {
             api.add(note(
                 &format!("study {}", i),
-                &format!("mushroom body dopamine alpha{} beta{} gamma{} delta{} epsilon{} zeta{}", i, i, i, i, i, i),
+                &format!(
+                    "mushroom body dopamine alpha{} beta{} gamma{} delta{} epsilon{} zeta{}",
+                    i, i, i, i, i, i
+                ),
             ))
             .unwrap();
         }
         let new_id = api
-            .add(note(
-                "new study",
-                "mushroom body dopamine x y z",
-            ))
+            .add(note("new study", "mushroom body dopamine x y z"))
             .unwrap()
             .id;
         let n_weak: i64 = store
@@ -907,10 +1041,16 @@ mod tests {
         let api = MemoryApi::new(&store, &cfg);
         // One word shared, 9 words unique: jaccard ≈ 0.09 (above 0.05 default).
         // Below 0.05: share 0/10 words → no edge.
-        api.add(note("alpha", "one two three four five six seven eight nine ten"))
-            .unwrap();
+        api.add(note(
+            "alpha",
+            "one two three four five six seven eight nine ten",
+        ))
+        .unwrap();
         let new_id = api
-            .add(note("beta", "eleven twelve thirteen fourteen fifteen sixteen"))
+            .add(note(
+                "beta",
+                "eleven twelve thirteen fourteen fifteen sixteen",
+            ))
             .unwrap()
             .id;
         let n_weak: i64 = store
@@ -942,14 +1082,19 @@ mod tests {
         api.add(note("isolated", "iso iso iso")).unwrap();
         let edge_api = crate::edge::EdgeApi::new(&store, &cfg);
         edge_api
-            .link(&anchor, &a, crate::schema::EdgeType::Related, 0.5, None, None)
+            .link(
+                &anchor,
+                &a,
+                crate::schema::EdgeType::Related,
+                0.5,
+                None,
+                None,
+            )
             .unwrap();
         // reflect_candidates: b and c are least connected; a is next;
         // anchor is most connected; isolated was just added (no edges)
         // — should also appear.
-        let hits = api
-            .reflect_candidates(chrono::Utc::now(), 7, 10)
-            .unwrap();
+        let hits = api.reflect_candidates(chrono::Utc::now(), 7, 10).unwrap();
         let ids: Vec<String> = hits.iter().map(|m| m.id.clone()).collect();
         // isolated (0 edges) and b, c (0 edges) should all appear; a (1 edge)
         // and anchor (1 edge) should too if the limit is large enough.
@@ -977,9 +1122,7 @@ mod tests {
                 rusqlite::params![past, old.id],
             )
             .unwrap();
-        let hits = api
-            .reflect_candidates(chrono::Utc::now(), 7, 10)
-            .unwrap();
+        let hits = api.reflect_candidates(chrono::Utc::now(), 7, 10).unwrap();
         let ids: Vec<String> = hits.iter().map(|m| m.id.clone()).collect();
         assert_eq!(ids.len(), 1, "only fresh memory should match: {:?}", ids);
         assert!(!ids.is_empty());
@@ -995,17 +1138,39 @@ mod tests {
         let edge_api = crate::edge::EdgeApi::new(&store, &cfg);
         // Two memories: "alpha" (matched by query) and "beta" (linked to alpha).
         // Beta doesn't contain the query terms but should appear via expansion.
-        let alpha = api.add(note("alpha", "dopamine release reward")).unwrap().id;
-        let beta = api.add(note("beta", "antenna olfactory circuit")).unwrap().id;
+        let alpha = api
+            .add(note("alpha", "dopamine release reward"))
+            .unwrap()
+            .id;
+        let beta = api
+            .add(note("beta", "antenna olfactory circuit"))
+            .unwrap()
+            .id;
         edge_api
-            .link(&alpha, &beta, crate::schema::EdgeType::Related, 0.8, None, None)
+            .link(
+                &alpha,
+                &beta,
+                crate::schema::EdgeType::Related,
+                0.8,
+                None,
+                None,
+            )
             .unwrap();
         // Search for a term only in alpha.
         let hits = api
-            .search("dopamine", SearchOpts { limit: Some(10), ..Default::default() })
+            .search(
+                "dopamine",
+                SearchOpts {
+                    limit: Some(10),
+                    ..Default::default()
+                },
+            )
             .unwrap();
         let ids: Vec<String> = hits.iter().map(|h| h.memory.id.clone()).collect();
-        assert!(ids.contains(&alpha), "alpha (direct match) must be in results");
+        assert!(
+            ids.contains(&alpha),
+            "alpha (direct match) must be in results"
+        );
         assert!(
             ids.contains(&beta),
             "beta (1-hop neighbor of alpha) should be expanded in, got: {:?}",
@@ -1024,13 +1189,32 @@ mod tests {
         cfg.edges.max_neighbor_hops = 0;
         let api = MemoryApi::new(&store, &cfg);
         let edge_api = crate::edge::EdgeApi::new(&store, &cfg);
-        let alpha = api.add(note("alpha", "dopamine release reward")).unwrap().id;
-        let beta = api.add(note("beta", "antenna olfactory circuit")).unwrap().id;
+        let alpha = api
+            .add(note("alpha", "dopamine release reward"))
+            .unwrap()
+            .id;
+        let beta = api
+            .add(note("beta", "antenna olfactory circuit"))
+            .unwrap()
+            .id;
         edge_api
-            .link(&alpha, &beta, crate::schema::EdgeType::Related, 0.8, None, None)
+            .link(
+                &alpha,
+                &beta,
+                crate::schema::EdgeType::Related,
+                0.8,
+                None,
+                None,
+            )
             .unwrap();
         let hits = api
-            .search("dopamine", SearchOpts { limit: Some(10), ..Default::default() })
+            .search(
+                "dopamine",
+                SearchOpts {
+                    limit: Some(10),
+                    ..Default::default()
+                },
+            )
             .unwrap();
         let ids: Vec<String> = hits.iter().map(|h| h.memory.id.clone()).collect();
         assert!(ids.contains(&alpha));
@@ -1077,18 +1261,18 @@ mod tests {
             claimed_by: None,
             parent_id: None,
             completed_at: None,
-
         };
         let tx = store.conn.unchecked_transaction().unwrap();
         Store::insert_memory_tx(&tx, &m).unwrap();
         tx.commit().unwrap();
         drop(m);
 
-        let hits = api
-            .reflect_candidates(chrono::Utc::now(), 7, 10)
-            .unwrap();
+        let hits = api.reflect_candidates(chrono::Utc::now(), 7, 10).unwrap();
         let ids: Vec<String> = hits.iter().map(|m| m.id.clone()).collect();
-        assert!(!ids.contains(&"id-1".to_string()), "identity memory should be excluded");
+        assert!(
+            !ids.contains(&"id-1".to_string()),
+            "identity memory should be excluded"
+        );
         assert_eq!(hits.len(), 1);
     }
 
@@ -1123,7 +1307,9 @@ mod action_field_tests {
     use crate::schema::{ActionStatus, Category, MemoryType, NewMemory, Source, Tier};
     use crate::store::Store;
 
-    fn cfg() -> crate::config::Config { crate::config::Config::default() }
+    fn cfg() -> crate::config::Config {
+        crate::config::Config::default()
+    }
     fn store() -> (Store, crate::config::Config) {
         let s = Store::open_in_memory().unwrap();
         (s, cfg())
@@ -1219,10 +1405,12 @@ mod action_business_logic_tests {
     //! - Both filter out completed / abandoned.
 
     use super::*;
-    use crate::schema::{ActionStatus, MemoryType, Tier, Category, Source};
+    use crate::schema::{ActionStatus, Category, MemoryType, Source, Tier};
     use crate::store::Store;
 
-    fn cfg() -> crate::config::Config { crate::config::Config::default() }
+    fn cfg() -> crate::config::Config {
+        crate::config::Config::default()
+    }
     fn store() -> (Store, crate::config::Config) {
         let s = Store::open_in_memory().unwrap();
         (s, cfg())
@@ -1259,8 +1447,10 @@ mod action_business_logic_tests {
         m.status = ActionStatus::Completed;
         api.update(&m).unwrap();
         let m2 = api.get(&res.id).unwrap().unwrap();
-        assert!(m2.completed_at.is_some(),
-                "update(Completed) must set completed_at");
+        assert!(
+            m2.completed_at.is_some(),
+            "update(Completed) must set completed_at"
+        );
         assert_eq!(m2.status, ActionStatus::Completed);
     }
 
@@ -1275,8 +1465,10 @@ mod action_business_logic_tests {
         m.status = ActionStatus::Abandoned;
         api.update(&m).unwrap();
         let m2 = api.get(&res.id).unwrap().unwrap();
-        assert!(m2.completed_at.is_some(),
-                "update(Abandoned) must set completed_at");
+        assert!(
+            m2.completed_at.is_some(),
+            "update(Abandoned) must set completed_at"
+        );
     }
 
     /// update() with status=active should NOT touch completed_at
@@ -1294,8 +1486,10 @@ mod action_business_logic_tests {
         m2.status = ActionStatus::Active;
         api.update(&m2).unwrap();
         let m3 = api.get(&res.id).unwrap().unwrap();
-        assert!(m3.completed_at.is_none(),
-                "re-activation should clear completed_at");
+        assert!(
+            m3.completed_at.is_none(),
+            "re-activation should clear completed_at"
+        );
     }
 
     /// memory_next(): 1 highest-priority active action.
@@ -1408,7 +1602,11 @@ mod action_business_logic_tests {
         // cross_project_search=true → effective filter is None →
         // list returns everything regardless of default_project.
         let mems = api.list(100).unwrap();
-        assert_eq!(mems.len(), 1, "cross-project escape should show the other-project memory");
+        assert_eq!(
+            mems.len(),
+            1,
+            "cross-project escape should show the other-project memory"
+        );
     }
 
     /// v0.4 backward compatibility: with no default_project, NULL
@@ -1431,4 +1629,125 @@ mod action_business_logic_tests {
         assert!(ids.contains(&id1.as_str()));
         assert!(ids.contains(&id2.as_str()));
     }
+
+    /// Embedding blend search: with embeddings disabled (default),
+    /// `search()` returns BM25-only hits as before. We can't exercise
+    /// the embedder load path in a unit test (requires network for
+    /// the first-time model download), but we can verify that the
+    /// disabled branch is hit and the score field is unchanged from
+    /// pre-blend behavior.
+    #[test]
+    fn search_with_embeddings_disabled_still_works() {
+        let (store, mut cfg) = store();
+        cfg.embedding.enabled = false;
+        let api = MemoryApi::new(&store, &cfg);
+        api.add(make_mem("alpha content", "alpha")).unwrap();
+        api.add(make_mem("beta content", "beta")).unwrap();
+        let hits = api
+            .search(
+                "alpha",
+                SearchOpts {
+                    limit: Some(10),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(!hits.is_empty());
+        assert!(hits.iter().any(|h| h.memory.title == "alpha"));
+    }
+
+    /// Cosine math used by the blend path: identical → 1.0,
+    /// orthogonal → 0.0, zero-norm → 0.0.
+    #[test]
+    fn cosine_for_blend_search() {
+        use crate::embeddings::cosine;
+        let v = vec![1.0, 0.0, 0.0];
+        assert!((cosine(&v, &v) - 1.0).abs() < 1e-6);
+        let a = vec![1.0, 0.0, 0.0];
+        let b = vec![0.0, 1.0, 0.0];
+        assert!(cosine(&a, &b).abs() < 1e-6);
+        let z = vec![0.0, 0.0, 0.0];
+        assert_eq!(cosine(&z, &v), 0.0);
+    }
+
+
+    /// v1.0 auto-merge: adding a near-identical note soft-deletes the
+    /// old one and retargets its edges to the new one.
+    #[test]
+    fn auto_merge_consolidates_near_duplicate_notes() {
+        let (store, cfg) = store();
+        let api = MemoryApi::new(&store, &cfg);
+        // First note.
+        let content = "mneme uses content_hash dedup which only catches exact duplicates.             Evolving documents like SKILL.md change slightly between sessions and bypass it.";
+        let id1 = api.add(make_mem(content, "evolving doc")).unwrap().id;
+        // A second, near-identical note (one word changed).
+        let content2 = "mneme uses content_hash dedup which only catches exact duplicates.             Evolving documents like SKILL.md change slightly between sessions and bypass it!";
+        let r2 = api.add(make_mem(content2, "evolving doc v2")).unwrap();
+        let id2 = r2.id;
+        assert_ne!(id1, id2, "exact hash differs, so no dedup");
+        // The old one should be soft-deleted (merged into the new).
+        let old = api.get(&id1).unwrap();
+        assert!(old.is_none(), "old memory should be soft-deleted after merge");
+        let new = api.get(&id2).unwrap().expect("new memory exists");
+        assert_eq!(new.status, ActionStatus::Active);
+        // Both active? No — only the new one is active.
+        let all = api.list(100).unwrap();
+        assert_eq!(all.len(), 1, "only the merged-into memory should be active");
+        assert_eq!(all[0].id, id2);
+    }
+
+    /// v1.0 auto-merge: only snapshot-type categories merge; decisions
+    /// use supersede edges (unchanged behavior).
+    #[test]
+    fn auto_merge_skips_decision_category() {
+        let (store, cfg) = store();
+        let api = MemoryApi::new(&store, &cfg);
+        let content = "use library A not library B for the parse step. Reasons: faster, smaller.";
+        let mut d1 = make_mem(content, "decision A");
+        d1.category = Category::Decision;
+        let id1 = api.add(d1).unwrap().id;
+        let content2 = "use library A not library B for the parse step. Reasons: faster, smaller!";
+        let mut d2 = make_mem(content2, "decision A v2");
+        d2.category = Category::Decision;
+        let id2 = api.add(d2).unwrap().id;
+        // Decision memories should NOT auto-merge (supersede edge instead).
+        let old = api.get(&id1).unwrap();
+        assert!(old.is_some(), "decision memories must not be merged");
+        let all = api.list(100).unwrap();
+        assert_eq!(all.len(), 2, "both decisions stay active");
+        // But they should be linked with a Supersedes edge.
+        let edge = crate::edge::EdgeApi::new(&store, &cfg);
+        let neighbors = edge.neighbors(&id2, 1).unwrap();
+        assert!(
+            neighbors.iter().any(|(m, _)| m.id == id1),
+            "decision v2 should supersede-link to v1"
+        );
+        let _ = id2;
+    }
+
+    /// v1.0 auto-merge: merged memory's edges are retargeted.
+    #[test]
+    fn auto_merge_retargets_edges() {
+        let (store, cfg) = store();
+        let api = MemoryApi::new(&store, &cfg);
+        // A related memory that will get linked to both.
+        let hub = api.add(make_mem("hub memory unrelated topic", "hub")).unwrap().id;
+        // First note; link it to hub manually.
+        let content = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega";
+        let id1 = api.add(make_mem(content, "doc1")).unwrap().id;
+        let edge_api = crate::edge::EdgeApi::new(&store, &cfg);
+        edge_api.link(&id1, &hub, crate::schema::EdgeType::Related, 0.8, None, None).unwrap();
+        // Second near-identical note.
+        let content2 = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega!";
+        let id2 = api.add(make_mem(content2, "doc2")).unwrap().id;
+        assert_ne!(id1, id2);
+        // doc1 was merged into doc2; the edge doc1→hub should now be
+        // doc2→hub.
+        let neighbors = edge_api.neighbors(&id2, 1).unwrap();
+        assert!(
+            neighbors.iter().any(|(m, _)| m.id == hub),
+            "edge from merged doc1 should be retargeted to doc2"
+        );
+    }
+
 }

@@ -94,3 +94,31 @@ default_project = ""
 # caller overrides. Equivalent to passing --all-projects on every CLI
 # read command. Env: MNEME_ALL_PROJECTS=1
 cross_project_search = false
+
+# ── Optional semantic search (v1.0) ─────────────────────────────────────────
+# When enabled, `mneme embed` downloads a sentence-transformer model
+# (default all-MiniLM-L6-v2 quantized, ~25 MB) and stores per-memory
+# embeddings in the `memory_embedding` table. `mneme search --embed`
+# blends cosine similarity with BM25 (final score =
+# bm25_weight * bm25 + embed_weight * cosine).
+#
+# Off by default. First call downloads the model to ~/.mneme/models/;
+# subsequent calls reuse the cached file.
+#
+# Env: MNEME_EMBEDDINGS_ENABLED=1
+[embedding]
+enabled = false
+model = "sentence-transformers/all-MiniLM-L6-v2-q"
+bm25_weight = 0.7
+embed_weight = 0.3
+
+# ── Auto-merge (v1.0) ─────────────────────────────────────────────────────
+# Near-duplicate snapshot memories (note/skill/insight/episodic) with
+# Jaccard similarity >= auto_merge_min_sim are auto-merged: the OLD
+# memory is soft-deleted and its edges retargeted to the new one.
+# This catches evolving documents (e.g. SKILL.md) that exact-content
+# dedup can't. Decision/Correction/Preference use supersede edges
+# instead (unchanged).
+[edges]
+auto_merge_enabled = true
+auto_merge_min_sim = 0.6
