@@ -1,8 +1,8 @@
 {
   "$schema": "https://typedoc.org/schema.json",
-  "entryPoints": ["packages/mneme-client/src/index.ts"],
+  "entryPoints": ["packages/mnemush-client/src/index.ts"],
   "out": "target/docs/typedoc",
-  "name": "mneme — TypeScript API",
+  "name": "mnemush — TypeScript API",
   "readme": "none",
   "skipErrorChecking": true,
   "excludePrivate": true,

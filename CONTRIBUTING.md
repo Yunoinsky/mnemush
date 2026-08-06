@@ -1,4 +1,4 @@
-# Contributing to Mneme
+# Contributing to Mnemush
 
 ## Development setup
 
@@ -12,8 +12,8 @@ nvm install 20
 nvm use 20
 
 # Clone
-git clone https://github.com/Yunoinsky/mneme.git
-cd mneme
+git clone https://github.com/Yunoinsky/mnemush.git
+cd mnemush
 
 # Build
 cargo build
@@ -25,12 +25,12 @@ cargo test
 ## Project layout
 
 ```
-mneme/
-├── crates/mneme/        # Rust core + MCP + CLI
+mnemush/
+├── crates/mnemush/        # Rust core + MCP + CLI
 ├── packages/
-│   ├── mneme-client/    # Shared TS library
-│   ├── mneme-pi/        # Pi extension
-│   └── mneme-opencode/  # OpenCode plugin
+│   ├── mnemush-client/    # Shared TS library
+│   ├── mnemush-pi/        # Pi extension
+│   └── mnemush-opencode/  # OpenCode plugin
 ├── docs/                # User-facing docs
 └── scripts/             # Build / release scripts
 ```
@@ -89,7 +89,7 @@ Common emojis (full set at gitmoji.dev):
 
 - Unit tests colocated with code (`#[cfg(test)] mod tests`)
 - TS builds verified via `tsc --noEmit`
-- Run all: `cargo test --manifest-path crates/mneme/Cargo.toml && npm run build`
+- Run all: `cargo test --manifest-path crates/mnemush/Cargo.toml && npm run build`
 
 ## Release process
 

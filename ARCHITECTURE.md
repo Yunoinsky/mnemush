@@ -1,10 +1,10 @@
-# Mneme Architecture
+# Mnemush Architecture
 
 > Brain-inspired memory layer for AI coding agents. Rust core, TS adapters.
 
 ## Design philosophy
 
-Mneme is structured around three principles borrowed from human memory:
+Mnemush is structured around three principles borrowed from human memory:
 
 1. **Identity is separate from memory.** Who you are and who the agent is shapes how memories are encoded, retrieved, and evaluated — but isn't itself a memory trace. Identity is immutable, always-injected, and never decays.
 
@@ -38,7 +38,7 @@ Mneme is structured around three principles borrowed from human memory:
 
 ## Module map
 
-### Rust core (`crates/mneme/src/`)
+### Rust core (`crates/mnemush/src/`)
 
 ```
 lib.rs              — public API surface + shared helpers (expand_tilde, init_tracing)
@@ -52,7 +52,7 @@ graph.rs            — PageRank, label propagation, DOT / D3-JSON export (v0.3)
 forget.rs           — Ebbinghaus decay, active pruning, access boost
 identity.rs         — USER/PERSONA/CONSTITUTION file load + identity sync
 eval.rs             — self-eval NDJSON log maintenance (TTL / line / file caps)
-error.rs            — MnemeError + Result alias
+error.rs            — MnemushError + Result alias
 bin/mcp.rs          — MCP stdio server (5 tools)
 bin/cli.rs          — terminal CLI (clap)
 ```
@@ -60,9 +60,9 @@ bin/cli.rs          — terminal CLI (clap)
 ### TS adapters (`packages/`)
 
 ```
-mneme-client/       — shared library to spawn mneme binary + MCP RPC
-mneme-pi/           — Pi extension (4 hooks + 3 tools)
-mneme-opencode/     — OpenCode plugin (4 hooks + 3 tools)
+mnemush-client/       — shared library to spawn mnemush binary + MCP RPC
+mnemush-pi/           — Pi extension (4 hooks + 3 tools)
+mnemush-opencode/     — OpenCode plugin (4 hooks + 3 tools)
 ```
 
 ## Data flow
@@ -108,17 +108,17 @@ MCP: memory_search → Rust
 
 ### Session lifecycle (v0.2)
 
-Actual hook flow in the pi extension (`packages/mneme-pi/src/index.ts`):
+Actual hook flow in the pi extension (`packages/mnemush-pi/src/index.ts`):
 
 ```
 session_start:
-  1. connect to mneme-mcp (spawn subprocess)
-  2. sendStatus("🧠 mneme connected")
+  1. connect to mnemush-mcp (spawn subprocess)
+  2. sendStatus("🧠 mnemush connected")
   3. surfacePendingIdentityProposals() — async, non-blocking
   4. surfaceReflectCandidateCount() — async, non-blocking
   Identity files (USER/PERSONA/CONSTITUTION) are loaded by the
   pi host from disk and injected into the system prompt (frozen
-  for the session); mneme doesn't re-read them.
+  for the session); mnemush doesn't re-read them.
 
 before_agent_start (each user prompt):
   1. reset toolCallsThisTurn counter
@@ -133,7 +133,7 @@ after_tool_call (each tool result):
   Two listeners, both skip our own tools (Pi + OpenCode namespaces)
   so we never record our own failures as "tool failure" memories:
   skip list covers Pi names (`memory`, `memory_get`, ..., identity_*, ...)
-  AND OpenCode names (`mneme-memory`, `mneme-memory_search`, ...).
+  AND OpenCode names (`mnemush-memory`, `mnemush-memory_search`, ...).
   - L1 error capture: if result.is_error && result.error →
     memory_add(category=failure, importance=0.7, needs_review=true)
   - Periodic insight nudge: increment counter; at the 6th
@@ -142,25 +142,25 @@ after_tool_call (each tool result):
 
 session_end:
   1. runPruneOnSessionEnd() — default `apply` (soft-delete up
-     to MNEME_PRUNE_SESSION_LIMIT candidates, default 5);
-     set MNEME_PRUNE_ON_SESSION_END=dry to list only, =off to skip.
+     to MNEMUSH_PRUNE_SESSION_LIMIT candidates, default 5);
+     set MNEMUSH_PRUNE_ON_SESSION_END=dry to list only, =off to skip.
      Hard-delete (`--isolate`) is NEVER auto-run.
   2. runEdgeDecayOnSessionEnd() — default ON; runs
-     `mneme edge-decay` which recomputes every active edge's
+     `mnemush edge-decay` which recomputes every active edge's
      strength via the same Ebbinghaus formula as memory confidence.
-     Set MNEME_EDGE_DECAY_ON_SESSION_END=off to skip. Without this
+     Set MNEMUSH_EDGE_DECAY_ON_SESSION_END=off to skip. Without this
      pass, edge strength is monotonically non-decreasing, so the
      graph only grows noisier over time.
   3. runNeedsReviewOnSessionEnd() — default ON; runs
-     `mneme process-needs-review` which clears the `needs_review`
-     flag on items older than MNEME_NEEDS_REVIEW_GRACE_DAYS (1d
+     `mnemush process-needs-review` which clears the `needs_review`
+     flag on items older than MNEMUSH_NEEDS_REVIEW_GRACE_DAYS (1d
      default). For `category=failure` items, also downgrades
      importance by 0.1 per pass so repeated errors fade out.
-     Set MNEME_NEEDS_REVIEW_ON_SESSION_END=off to skip. Without
+     Set MNEMUSH_NEEDS_REVIEW_ON_SESSION_END=off to skip. Without
      this pass, the needs_review queue grows unboundedly (the
      after_tool_call error capture sets the flag but no consumer
      cleared it).
-  4. client.disconnect() — close mneme-mcp subprocess
+  4. client.disconnect() — close mnemush-mcp subprocess
 ```
 
 ## Storage
@@ -244,14 +244,14 @@ CREATE TABLE schema_version (
 ### File layout
 
 ```
-~/.mneme/
+~/.mnemush/
 ├── identity/
 │   ├── USER.md
 │   ├── PERSONA.md
 │   └── CONSTITUTION.md
 ├── config.toml
-├── mneme.db
-├── mneme.db-wal            (WAL journal, transient)
+├── mnemush.db
+├── mnemush.db-wal            (WAL journal, transient)
 └── pending.jsonl           (v0.2: identity reflection proposals, transient)
 ```
 

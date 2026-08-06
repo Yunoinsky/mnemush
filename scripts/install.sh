@@ -1,5 +1,5 @@
 #!/bin/bash
-# Install the mneme binary and the agent adapters.
+# Install the mnemush binary and the agent adapters.
 # Usage: ./scripts/install.sh [--dev]
 set -e
 
@@ -11,32 +11,32 @@ cd "$PROJECT_ROOT"
 DEV=0
 if [[ "$1" == "--dev" ]]; then DEV=1; fi
 
-echo "→ Building mneme binary (Rust)..."
-cargo build --release --manifest-path crates/mneme/Cargo.toml
+echo "→ Building mnemush binary (Rust)..."
+cargo build --release --manifest-path crates/mnemush/Cargo.toml
 
-BIN_PATH="crates/mneme/target/release/mneme-mcp"
+BIN_PATH="crates/mnemush/target/release/mnemush-mcp"
 if [[ ! -f "$BIN_PATH" ]]; then
     echo "ERROR: build did not produce $BIN_PATH"
     exit 1
 fi
 
-echo "→ Installing mneme-mcp to ~/.cargo/bin..."
+echo "→ Installing mnemush-mcp to ~/.cargo/bin..."
 mkdir -p ~/.cargo/bin
-cp "$BIN_PATH" ~/.cargo/bin/mneme-mcp
-cp crates/mneme/target/release/mneme ~/.cargo/bin/mneme 2>/dev/null || true
-chmod +x ~/.cargo/bin/mneme-mcp ~/.cargo/bin/mneme
+cp "$BIN_PATH" ~/.cargo/bin/mnemush-mcp
+cp crates/mnemush/target/release/mnemush ~/.cargo/bin/mnemush 2>/dev/null || true
+chmod +x ~/.cargo/bin/mnemush-mcp ~/.cargo/bin/mnemush
 
 # macOS: ad-hoc re-sign after `cp`. The cp strips the original signature
 # from the built binary, and macOS will SIGKILL an unsigned binary
-# when it's launched (`mneme-mcp` silently exits with broken pipe on
+# when it's launched (`mnemush-mcp` silently exits with broken pipe on
 # every attempt). Ignore failure for non-macOS or missing codesign.
 if [[ "$(uname -s)" == "Darwin" ]] && command -v codesign >/dev/null 2>&1; then
-    codesign --force --sign - ~/.cargo/bin/mneme-mcp 2>/dev/null || true
-    codesign --force --sign - ~/.cargo/bin/mneme 2>/dev/null || true
+    codesign --force --sign - ~/.cargo/bin/mnemush-mcp 2>/dev/null || true
+    codesign --force --sign - ~/.cargo/bin/mnemush 2>/dev/null || true
 fi
 
-echo "→ Initializing ~/.mneme/..."
-./crates/mneme/target/release/mneme init
+echo "→ Initializing ~/.mnemush/..."
+./crates/mnemush/target/release/mnemush init
 
 echo "→ Building TS packages..."
 npm run build --workspaces --if-present
@@ -45,10 +45,10 @@ echo ""
 echo "✓ Done."
 echo ""
 echo "Next steps:"
-echo "  - For Pi:   pi install npm:mneme-pi"
+echo "  - For Pi:   pi install npm:mnemush-pi"
 echo "  - For OpenCode:"
 echo "      mkdir -p ~/.config/opencode/plugin"
-echo "      ln -sf \"$PROJECT_ROOT/packages/mneme-opencode/dist/index.js\" \\"
-echo "             ~/.config/opencode/plugin/mneme.js"
-echo "  - Verify:   mneme --version"
-echo "              mneme stats"
+echo "      ln -sf \"$PROJECT_ROOT/packages/mnemush-opencode/dist/index.js\" \\"
+echo "             ~/.config/opencode/plugin/mnemush.js"
+echo "  - Verify:   mnemush --version"
+echo "              mnemush stats"

@@ -1,5 +1,5 @@
-// Integration test: load mneme-pi's dist, exercise the after_tool_call
-// hook, verify it writes one NDJSON line per mneme-related tool call.
+// Integration test: load mnemush-pi's dist, exercise the after_tool_call
+// hook, verify it writes one NDJSON line per mnemush-related tool call.
 //
 // This is the E2E check that the eval log pipeline actually works
 // end-to-end when triggered the way the pi runtime would trigger it.
@@ -13,7 +13,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = __filename.replace(/\/[^/]+$/, "");
 
 // Path to the dist (built artifact under test)
-const PI_DIST = "$HOME/Project/mneme/packages/mneme-pi/dist/index.js";
+const PI_DIST = "$HOME/Project/mnemush/packages/mnemush-pi/dist/index.js";
 
 let passed = 0, failed = 0;
 function check(name, ok, detail = "") {
@@ -24,19 +24,19 @@ function check(name, ok, detail = "") {
 // Test runner — each test rebuilds the env fresh.
 async function withIsolatedHome(fn) {
   const tmpHome = await import("node:fs").then((fs) =>
-    fs.promises.mkdtemp(join(tmpdir(), "mneme-eval-test-"))
+    fs.promises.mkdtemp(join(tmpdir(), "mnemush-eval-test-"))
   );
-  const evalDir = join(tmpHome, ".mneme", "eval");
-  // Override HOME so mneme-pi writes to ${HOME}/.mneme/eval
+  const evalDir = join(tmpHome, ".mnemush", "eval");
+  // Override HOME so mnemush-pi writes to ${HOME}/.mnemush/eval
   const origHome = process.env.HOME;
-  const origData = process.env.MNEME_DATA_DIR;
+  const origData = process.env.MNEMUSH_DATA_DIR;
   process.env.HOME = tmpHome;
-  process.env.MNEME_DATA_DIR = join(tmpHome, ".mneme");
+  process.env.MNEMUSH_DATA_DIR = join(tmpHome, ".mnemush");
   try {
     await fn(tmpHome, evalDir);
   } finally {
     process.env.HOME = origHome;
-    process.env.MNEME_DATA_DIR = origData;
+    process.env.MNEMUSH_DATA_DIR = origData;
     // Best-effort cleanup
     try { await import("node:fs").then((fs) => fs.promises.rm(tmpHome, { recursive: true, force: true })); } catch {}
   }
@@ -55,16 +55,16 @@ function makeFakePi() {
   };
 }
 
-// Re-import the mneme-pi extension module under test. The module
-// imports from "mneme-client" which uses node_modules — we have to
+// Re-import the mnemush-pi extension module under test. The module
+// imports from "mnemush-client" which uses node_modules — we have to
 // point require to the project's node_modules so the import resolves.
 import { createRequire } from "node:module";
 const require_fn = createRequire(import.meta.url);
 function loadExtension() {
   try {
-    // Resolve "mneme-client" to the project's copy
-    const modulePath = require_fn.resolve("mneme-client", { paths: [
-      "$HOME/Project/mneme/packages/mneme-pi",
+    // Resolve "mnemush-client" to the project's copy
+    const modulePath = require_fn.resolve("mnemush-client", { paths: [
+      "$HOME/Project/mnemush/packages/mnemush-pi",
     ] });
     // Bust the require cache so each test gets a fresh module
     delete require_fn.cache[PI_DIST];
@@ -72,12 +72,12 @@ function loadExtension() {
     return mod.default || mod;
   } catch (e) {
     // Fallback: monkey-patch Module._resolveFilename to point
-    // mneme-client at our local copy
+    // mnemush-client at our local copy
     const Module = require_fn("node:module");
     const origResolve = Module._resolveFilename;
     Module._resolveFilename = function (request, parent, ...rest) {
-      if (request === "mneme-client") {
-        return "$HOME/Project/mneme/packages/mneme-client/dist/index.js";
+      if (request === "mnemush-client") {
+        return "$HOME/Project/mnemush/packages/mnemush-client/dist/index.js";
       }
       return origResolve.call(this, request, parent, ...rest);
     };
@@ -94,7 +94,7 @@ function loadExtension() {
 async function run() {
   const activate = loadExtension();
 
-  // ── Test 1: mneme-memory-search hook fires ───────────────────────
+  // ── Test 1: mnemush-memory-search hook fires ───────────────────────
   await withIsolatedHome(async (tmpHome, evalDir) => {
     const pi = makeFakePi();
     activate(pi);
@@ -142,20 +142,20 @@ async function run() {
     check("entry.error is null", entry.error === null);
   });
 
-  // ── Test 2: non-mneme tools are NOT logged ──────────────────────
+  // ── Test 2: non-mnemush tools are NOT logged ──────────────────────
   await withIsolatedHome(async (tmpHome, evalDir) => {
     const pi = makeFakePi();
     activate(pi);
     const handler = pi.handlers.get("after_tool_call");
     await handler({
-      tool_name: "Bash",  // not a mneme tool
+      tool_name: "Bash",  // not a mnemush tool
       args: { command: "ls" },
       result: { content: [{ text: "file1\nfile2" }], isError: false },
     });
     await new Promise((r) => setTimeout(r, 50));
     const files = await readdir(evalDir).catch(() => []);
     const ndjson = files.filter((f) => f.endsWith(".ndjson"));
-    check("non-mneme tools NOT logged", ndjson.length === 0,
+    check("non-mnemush tools NOT logged", ndjson.length === 0,
           `log dir has ${ndjson.length} files`);
   });
 
@@ -241,7 +241,7 @@ async function run() {
           `len=${content_field.length}, end='${content_field.slice(-10)}'`);
   });
 
-  // ── Test 6: CLI mneme eval stats reads the log ───────────────────
+  // ── Test 6: CLI mnemush eval stats reads the log ───────────────────
   await withIsolatedHome(async (tmpHome, evalDir) => {
     const pi = makeFakePi();
     activate(pi);
@@ -255,17 +255,17 @@ async function run() {
                     result: { content: [{ text: "{}" }], isError: false } });
     await new Promise((r) => setTimeout(r, 200));
 
-    // Run the actual mneme binary against this HOME
+    // Run the actual mnemush binary against this HOME
     const r = spawn(
-      "$HOME/.cargo/bin/mneme",
+      "$HOME/.cargo/bin/mnemush",
       ["eval", "stats"],
-      { env: { ...process.env, HOME: tmpHome, MNEME_DATA_DIR: join(tmpHome, ".mneme") },
+      { env: { ...process.env, HOME: tmpHome, MNEMUSH_DATA_DIR: join(tmpHome, ".mnemush") },
         encoding: "utf8" },
     );
     let out = "";
     for await (const chunk of r.stdout) out += chunk;
     await new Promise((res) => r.on("exit", res));
-    check("CLI mneme eval stats reads the log",
+    check("CLI mnemush eval stats reads the log",
           out.includes("3 total calls"),
           `output: ${out.slice(0, 200)}`);
     check("CLI reports per-tool breakdown",
@@ -275,10 +275,10 @@ async function run() {
 
   // ── Test 7: OpenCode-style hyphenated names are recognized ──────
   // Regression: the old hand-maintained allowlist used underscores
-  // (`mneme-memory_search`) but OpenCode registers hyphenated names
-  // (`mneme-memory-search`). None of the OpenCode tools matched, so
+  // (`mnemush-memory_search`) but OpenCode registers hyphenated names
+  // (`mnemush-memory-search`). None of the OpenCode tools matched, so
   // calling them in a Pi session self-triggered the nudge counter and
-  // they were never logged to the eval NDJSON. isMnemeTool() prefix-
+  // they were never logged to the eval NDJSON. isMnemushTool() prefix-
   // matches, so both spellings are covered.
   await withIsolatedHome(async (tmpHome, evalDir) => {
     const pi = makeFakePi();
@@ -287,12 +287,12 @@ async function run() {
     const sessionStart = pi.handlers.get("session_start");
     if (sessionStart) await sessionStart();
     await handler({
-      tool_name: "mneme-memory-search",  // OpenCode spelling
+      tool_name: "mnemush-memory-search",  // OpenCode spelling
       args: { query: "x" },
       result: { content: [{ text: "[]" }], isError: false },
     });
     await handler({
-      tool_name: "mneme-memory-action-update",  // OpenCode v0.3 spelling
+      tool_name: "mnemush-memory-action-update",  // OpenCode v0.3 spelling
       args: { id: "abc", status: "completed" },
       result: { content: [{ text: "{}" }], isError: false },
     });
@@ -306,10 +306,10 @@ async function run() {
     check("both OpenCode tool calls logged", lines.length === 2,
           `got ${lines.length}`);
     const tools = lines.map((l) => JSON.parse(l).tool);
-    check("mneme-memory-search logged",
-          tools.includes("mneme-memory-search"), `got ${tools}`);
-    check("mneme-memory-action-update logged",
-          tools.includes("mneme-memory-action-update"), `got ${tools}`);
+    check("mnemush-memory-search logged",
+          tools.includes("mnemush-memory-search"), `got ${tools}`);
+    check("mnemush-memory-action-update logged",
+          tools.includes("mnemush-memory-action-update"), `got ${tools}`);
   });
 
   console.log(`\n${passed} passed, ${failed} failed`);

@@ -1,0 +1,68 @@
+[package]
+name = "mnemush"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Brain-inspired memory layer for AI coding agents"
+license = "MulanPSL-2.0"
+repository = "https://github.com/Yunoinsky/mnemush"
+keywords = ["memory", "agent", "ai", "mcp", "sqlite"]
+categories = ["command-line-utilities", "database", "api-bindings"]
+
+[lib]
+name = "mnemush"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mnemush"
+path = "src/bin/cli.rs"
+
+[[bin]]
+name = "mnemush-mcp"
+path = "src/bin/mcp.rs"
+
+[dependencies]
+# Storage
+rusqlite = { version = "0.32", features = ["backup", "bundled", "chrono"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# ID generation
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+
+# Hashing
+sha2 = "0.10"
+hex = "0.4"
+
+# Embeddings (v1.0, opt-in)
+fastembed = "5"
+
+# MiniMax embedding API backend (embo-01, 1536d) — opt-in via model id
+ureq = { version = "2.12", features = ["json"] }
+
+# Text processing
+regex = "1"
+
+# Backup format: gzipped tar archive (v0.4)
+tar = "0.4"
+flate2 = "1"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Error handling
+thiserror = "1"
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3"

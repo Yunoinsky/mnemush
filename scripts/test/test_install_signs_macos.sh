@@ -2,9 +2,9 @@
 # TDD test: install.sh must re-sign binaries on macOS after `cp`.
 #
 # Problem: macOS kills binaries that were copied (not signed) with
-# `cp`. AGENTS.md says: "After any `cp` of `~/.cargo/bin/mneme*`,
+# `cp`. AGENTS.md says: "After any `cp` of `~/.cargo/bin/mnemush*`,
 # re-sign with `codesign --force --sign -`".
-# Without this fix, `mneme-mcp` launched right after install.sh on
+# Without this fix, `mnemush-mcp` launched right after install.sh on
 # macOS gets SIGKILL'd (exit 137 / broken pipe) and the smoke test
 # hangs. Users have to re-sign by hand.
 

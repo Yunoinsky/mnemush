@@ -1,5 +1,5 @@
 # Constitution — hard constraints
-# Edit ~/.mneme/identity/CONSTITUTION.md
+# Edit ~/.mnemush/identity/CONSTITUTION.md
 # This file is HUMAN-WRITABLE ONLY. The agent and the system cannot modify it.
 # These rules are loaded once at session start and enforced throughout.
 

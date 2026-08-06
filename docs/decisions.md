@@ -1,4 +1,4 @@
-# Mneme — Design Decisions
+# Mnemush — Design Decisions
 
 This file captures the why behind non-obvious choices. For broader context, see [ARCHITECTURE.md](../ARCHITECTURE.md) and [ROADMAP.md](../ROADMAP.md).
 
@@ -63,7 +63,7 @@ This file captures the why behind non-obvious choices. For broader context, see 
 
 ## D8. Why a `pi` command without `/config`
 
-**Decision**: No `/config` command in Pi. Users edit `~/.mneme/config.toml` directly.
+**Decision**: No `/config` command in Pi. Users edit `~/.mnemush/config.toml` directly.
 
 **Why**: `/config` would conflate two concerns — agent memory operations (which the agent should handle) with system configuration (which the user owns). Mixing them invites the agent to mutate its own behavior. The Unix-philosophy alternative — "files are the API" — keeps boundaries clear and aligns with how `CLAUDE.md` / `AGENTS.md` work.
 
@@ -87,7 +87,7 @@ This file captures the why behind non-obvious choices. For broader context, see 
 
 **Decision**: No Pi command named `/config` or anything similar. Configuration is file-based.
 
-**Why**: The user explicitly asked for manual editing as the only way to change parameters. We respect that boundary: no in-agent tool, no in-agent command. The CLI's `mneme config` subcommand (for terminal use) is also deliberately kept minimal.
+**Why**: The user explicitly asked for manual editing as the only way to change parameters. We respect that boundary: no in-agent tool, no in-agent command. The CLI's `mnemush config` subcommand (for terminal use) is also deliberately kept minimal.
 
 ## D12. v0.1 scope discipline
 
@@ -97,19 +97,19 @@ This file captures the why behind non-obvious choices. For broader context, see 
 
 **Trade-off accepted**: slower to reach feature parity with engram/pi-hermes-memory. Faster to reach a stable MVP.
 
-## D13. Why enum parse failures surface as MnemeError, not rusqlite::Error
+## D13. Why enum parse failures surface as MnemushError, not rusqlite::Error
 
-**Decision**: When `row_to_memory` reads a memory row whose `tier` / `category` / `source` / `memory_type` value doesn't parse to a known enum variant, the error surfaces as `MnemeError::Invalid("unknown Tier: 'active'")` and **not** the generic rusqlite wrapper `Conversion error from type Text at index: 0`.
+**Decision**: When `row_to_memory` reads a memory row whose `tier` / `category` / `source` / `memory_type` value doesn't parse to a known enum variant, the error surfaces as `MnemushError::Invalid("unknown Tier: 'active'")` and **not** the generic rusqlite wrapper `Conversion error from type Text at index: 0`.
 
-**Why**: The original `impl From<MnemeError> for rusqlite::Error` produced `FromSqlConversionFailure(0, Type::Text, Box::new(e))`. The Display impl for that variant prints "Conversion error from type Text at index: 0" first and **only reveals the real MnemeError if you walk the source chain**. A user hit this in 2026-07: their DB had 17 rows with `tier='active'` (a value not in the v0.2 enum), and the cryptic wrapper made the failure mode impossible to debug.
+**Why**: The original `impl From<MnemushError> for rusqlite::Error` produced `FromSqlConversionFailure(0, Type::Text, Box::new(e))`. The Display impl for that variant prints "Conversion error from type Text at index: 0" first and **only reveals the real MnemushError if you walk the source chain**. A user hit this in 2026-07: their DB had 17 rows with `tier='active'` (a value not in the v0.2 enum), and the cryptic wrapper made the failure mode impossible to debug.
 
 **How**: The new `From` impl uses `rusqlite::Error::ToSqlConversionFailure(Box::new(e))`, whose Display shows the inner error directly. Same mechanism (so closures with `?` keep working), but the user-facing message now reads `storage error: invalid input: unknown Tier: 'active'` instead of the misleading wrapper.
 
-**Cost**: zero — closures still propagate via `?` and the underlying MnemeError is preserved for tests / debugging.
+**Cost**: zero — closures still propagate via `?` and the underlying MnemushError is preserved for tests / debugging.
 
-**Migration**: the bug surfaced in the wild (17 user rows with tier='active'). Fixed in place with `UPDATE memory SET tier='global' WHERE tier='active'`; a `mneme migrate` CLI is a future addition (see v0.4 roadmap).
+**Migration**: the bug surfaced in the wild (17 user rows with tier='active'). Fixed in place with `UPDATE memory SET tier='global' WHERE tier='active'`; a `mnemush migrate` CLI is a future addition (see v0.4 roadmap).
 
-**Forward-compat note**: this fixes the *display* of unknown enum values but does NOT auto-accept them. A user upgrading to a future mneme with new categories still needs to be aware that any older rows may fail to read until migrated. If we ever want to silently absorb forward-incompatible values, this is the place to revisit.
+**Forward-compat note**: this fixes the *display* of unknown enum values but does NOT auto-accept them. A user upgrading to a future mnemush with new categories still needs to be aware that any older rows may fail to read until migrated. If we ever want to silently absorb forward-incompatible values, this is the place to revisit.
 
 ## D14. Why agent self-memory is a status column on `memory`, not a separate table
 

@@ -1,15 +1,15 @@
-# Releasing Mneme
+# Releasing Mnemush
 
 Manual checklist for cutting a release. Currently no automation — pin versions, build, smoke-test, tag, push.
 
 ## Pre-release
 
 1. **Bump versions.** All four must match:
-   - `crates/mneme/Cargo.toml` — `version`
+   - `crates/mnemush/Cargo.toml` — `version`
    - `package.json` (root) — `version`
-   - `packages/mneme-client/package.json` — `version`
-   - `packages/mneme-pi/package.json` — `version`
-   - `packages/mneme-opencode/package.json` — `version`
+   - `packages/mnemush-client/package.json` — `version`
+   - `packages/mnemush-pi/package.json` — `version`
+   - `packages/mnemush-opencode/package.json` — `version`
 
 2. **Move CHANGELOG.** `## Unreleased` → `## vX.Y.Z — YYYY-MM-DD`. Add a one-line summary of the release.
 
@@ -17,14 +17,14 @@ Manual checklist for cutting a release. Currently no automation — pin versions
 
 4. **Run the full test suite.**
    ```bash
-   cargo test --manifest-path crates/mneme/Cargo.toml
+   cargo test --manifest-path crates/mnemush/Cargo.toml
    npm run build
    ```
 
 ## Build
 
 ```bash
-cargo build --release --manifest-path crates/mneme/Cargo.toml
+cargo build --release --manifest-path crates/mnemush/Cargo.toml
 npm run build --workspaces --if-present
 ```
 
@@ -32,9 +32,9 @@ npm run build --workspaces --if-present
 
 ```bash
 ./scripts/install.sh --dev
-mneme --version            # confirm version string
-mneme stats                # should print counts
-mneme status               # one-line health check
+mnemush --version            # confirm version string
+mnemush stats                # should print counts
+mnemush status               # one-line health check
 ```
 
 ## Tag & push

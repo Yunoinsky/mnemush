@@ -1,0 +1,27 @@
+{
+  "name": "mnemush-pi",
+  "version": "1.0.0",
+  "description": "Mnemush memory extension for the Pi coding agent.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "echo 'no tests yet'"
+  },
+  "dependencies": {
+    "mnemush-client": "*"
+  },
+  "pi": {
+    "extensions": ["./dist/index.js"]
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MulanPSL-2.0"
+}

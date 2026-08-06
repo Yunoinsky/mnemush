@@ -1,5 +1,5 @@
 # User profile
-# Edit ~/.mneme/identity/USER.md
+# Edit ~/.mnemush/identity/USER.md
 # Used to bias search results and ground agent decisions.
 # Plain markdown with § entry separator (auto-parsed).
 # Cap at 5000 chars (configurable).

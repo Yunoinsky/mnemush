@@ -1,14 +1,14 @@
-"""TDD red phase: tests for mneme eval commands."""
+"""TDD red phase: tests for mnemush eval commands."""
 import json, os, subprocess, sys, tempfile, time
 from pathlib import Path
 
 
 def setup_eval_dir(tmpdir):
-    """Set up a fake ~/.mneme/eval/ with NDJSON log files."""
-    mneme_root = Path(tmpdir) / ".mneme" / "eval"
-    mneme_root.mkdir(parents=True)
+    """Set up a fake ~/.mnemush/eval/ with NDJSON log files."""
+    mnemush_root = Path(tmpdir) / ".mnemush" / "eval"
+    mnemush_root.mkdir(parents=True)
     os.environ["HOME"] = str(tmpdir)
-    return mneme_root
+    return mnemush_root
 
 
 def make_log(eval_dir, session_id, entries):
@@ -24,7 +24,7 @@ def test_stats_empty_dir():
     with tempfile.TemporaryDirectory() as tmp:
         os.environ["HOME"] = tmp
         r = subprocess.run(
-            ["$HOME/.cargo/bin/mneme", "eval", "stats"],
+            ["$HOME/.cargo/bin/mnemush", "eval", "stats"],
             capture_output=True, text=True, timeout=10,
         )
         assert r.returncode == 0, f"failed: {r.stderr}"
@@ -52,15 +52,15 @@ def test_stats_with_entries():
         ])
         make_log(eval_dir, "session-2", [
             {"ts": now - 50, "session": "session-2", "agent": "opencode",
-             "tool": "mneme-memory-search", "args_summary": {"query": "auth"},
+             "tool": "mnemush-memory-search", "args_summary": {"query": "auth"},
              "result_count": 0, "latency_ms": 8, "error": None},
             {"ts": now - 49, "session": "session-2", "agent": "opencode",
-             "tool": "mneme-status", "args_summary": {},
+             "tool": "mnemush-status", "args_summary": {},
              "result_count": 1, "latency_ms": 100, "error": "boom"},
         ])
 
         r = subprocess.run(
-            ["$HOME/.cargo/bin/mneme", "eval", "stats"],
+            ["$HOME/.cargo/bin/mnemush", "eval", "stats"],
             capture_output=True, text=True, timeout=10,
         )
         assert r.returncode == 0, f"failed: {r.stderr}"
@@ -68,7 +68,7 @@ def test_stats_with_entries():
         assert "5 total calls" in out or "5 calls" in out or "total: 5" in out.lower(), \
             f"expected 5 total calls, got: {out}"
         assert "memory_search" in out, f"missing per-tool breakdown: {out}"
-        assert "mneme-status" in out, f"missing OpenCode tool: {out}"
+        assert "mnemush-status" in out, f"missing OpenCode tool: {out}"
         assert ("1 / 5" in out or "1 error" in out or "errors: 1" in out.lower()
                 or "20.0%" in out), \
             f"missing error count: {out}"
@@ -86,7 +86,7 @@ def test_dump_ndjson():
         ])
 
         r = subprocess.run(
-            ["$HOME/.cargo/bin/mneme", "eval", "dump"],
+            ["$HOME/.cargo/bin/mnemush", "eval", "dump"],
             capture_output=True, text=True, timeout=10,
         )
         assert r.returncode == 0
@@ -114,7 +114,7 @@ def test_stats_since_filter():
         ])
 
         r = subprocess.run(
-            ["$HOME/.cargo/bin/mneme", "eval", "stats", "--since", "1d"],
+            ["$HOME/.cargo/bin/mnemush", "eval", "stats", "--since", "1d"],
             capture_output=True, text=True, timeout=10,
         )
         assert r.returncode == 0

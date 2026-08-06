@@ -1,12 +1,12 @@
 {
-  "name": "mneme-workspace",
+  "name": "mnemush-workspace",
   "version": "0.2.0",
   "private": true,
-  "description": "Mneme — brain-inspired memory for AI coding agents. Workspace root.",
+  "description": "Mnemush — brain-inspired memory for AI coding agents. Workspace root.",
   "workspaces": [
-    "packages/mneme-client",
-    "packages/mneme-pi",
-    "packages/mneme-opencode"
+    "packages/mnemush-client",
+    "packages/mnemush-pi",
+    "packages/mnemush-opencode"
   ],
   "devDependencies": {
     "@types/node": "^22.0.0",
@@ -14,13 +14,13 @@
     "typescript": "^5.4.0"
   },
   "scripts": {
-    "build:rust": "cargo build --release --manifest-path crates/mneme/Cargo.toml",
+    "build:rust": "cargo build --release --manifest-path crates/mnemush/Cargo.toml",
     "build:ts": "npm run build --workspaces --if-present",
     "build": "npm run build:rust && npm run build:ts",
-    "test:rust": "cargo test --manifest-path crates/mneme/Cargo.toml",
+    "test:rust": "cargo test --manifest-path crates/mnemush/Cargo.toml",
     "test:ts": "npm run test --workspaces --if-present",
     "test": "npm run test:rust && npm run test:ts",
-    "docs:rust": "cargo doc --manifest-path crates/mneme/Cargo.toml --no-deps --target-dir target/docs/rustdoc",
+    "docs:rust": "cargo doc --manifest-path crates/mnemush/Cargo.toml --no-deps --target-dir target/docs/rustdoc",
     "docs:ts": "typedoc --out target/docs/tsdoc",
     "docs": "npm run docs:rust && npm run docs:ts"
   },

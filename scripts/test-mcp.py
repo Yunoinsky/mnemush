@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Smoke test for the mneme-mcp server.
+"""Smoke test for the mnemush-mcp server.
 
-Spawns mneme-mcp, sends a series of JSON-RPC requests, prints responses.
+Spawns mnemush-mcp, sends a series of JSON-RPC requests, prints responses.
 
 Covers all 12 MCP tools at least once:
   v0.1 (smoke baseline):  memory_add, memory_search, memory_link,
                            memory_neighbors, memory_get, scanner
-  v0.2 (auto-maintenance): mneme_status, memory_reflect,
+  v0.2 (auto-maintenance): mnemush_status, memory_reflect,
                            memory_save_search_result, identity_propose
 """
 import json
@@ -21,8 +21,8 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-DB_PATH = os.environ.get("MNEME_DB_PATH", "/tmp/mneme-mcp-smoke.db")
-DATA_DIR = os.environ.get("MNEME_DATA_DIR", "/tmp/mneme-mcp-smoke-data")
+DB_PATH = os.environ.get("MNEMUSH_DB_PATH", "/tmp/mnemush-mcp-smoke.db")
+DATA_DIR = os.environ.get("MNEMUSH_DATA_DIR", "/tmp/mnemush-mcp-smoke-data")
 for ext in ("", "-wal", "-shm"):
     p = DB_PATH + ext
     if os.path.exists(p):
@@ -31,11 +31,11 @@ if os.path.isdir(DATA_DIR):
     shutil.rmtree(DATA_DIR)
 
 env = os.environ.copy()
-env["MNEME_DB_PATH"] = DB_PATH
-env["MNEME_DATA_DIR"] = DATA_DIR
+env["MNEMUSH_DB_PATH"] = DB_PATH
+env["MNEMUSH_DATA_DIR"] = DATA_DIR
 
 proc = subprocess.Popen(
-    ["mneme-mcp.exe" if os.name == "nt" else "mneme-mcp"],
+    ["mnemush-mcp.exe" if os.name == "nt" else "mnemush-mcp"],
     stdin=subprocess.PIPE,
     stdout=subprocess.PIPE,
     stderr=subprocess.PIPE,
@@ -139,8 +139,8 @@ print(f"✓ scan: isError={is_err}, text={text[:80]}")
 assert is_err, "expected isError=True for secret-blocked add"
 assert "scan" in text.lower() or "blocked" in text.lower(), f"expected scan block, got: {text}"
 
-# 10. mneme_status (v0.2)
-r = call("mneme_status", {})
+# 10. mnemush_status (v0.2)
+r = call("mnemush_status", {})
 status_text = r["result"]["content"][0]["text"]
 print(f"✓ status: {status_text[:120]}{'...' if len(status_text) > 120 else ''}")
 # Should mention active memory count and edge count

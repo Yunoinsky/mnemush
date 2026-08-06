@@ -1,6 +1,6 @@
-# Mneme configuration
-# Copy to ~/.mneme/config.toml and edit.
-# Missing fields = use code defaults (see crates/mneme/src/config.rs).
+# Mnemush configuration
+# Copy to ~/.mnemush/config.toml and edit.
+# Missing fields = use code defaults (see crates/mnemush/src/config.rs).
 
 [forgetting]
 # Base half-life in days (importance=0.5 → 90d, importance=1.0 → 135d)
@@ -53,26 +53,26 @@ weight_recency = 0.3
 weight_importance = 0.2
 
 [storage]
-db_path = "~/.mneme/mneme.db"
+db_path = "~/.mnemush/mnemush.db"
 
 # ── Environment variable overrides ──────────────────────────────────────
 # Applied after TOML is loaded. See apply_env_overrides() in
-# crates/mneme/src/config.rs.
+# crates/mnemush/src/config.rs.
 #
-#   MNEME_DATA_DIR=/some/path         override data dir (identity, db)
-#                                     falls back to ~/.mneme
-#   MNEME_DB_PATH=/some/path/foo.db   overrides db_path above (wins)
-#   MNEME_HALF_LIFE_DAYS=30.0         overrides [forgetting].half_life_days
-#   MNEME_DISABLE_FORGETTING=true     archive mode (never decay)
+#   MNEMUSH_DATA_DIR=/some/path         override data dir (identity, db)
+#                                     falls back to ~/.mnemush
+#   MNEMUSH_DB_PATH=/some/path/foo.db   overrides db_path above (wins)
+#   MNEMUSH_HALF_LIFE_DAYS=30.0         overrides [forgetting].half_life_days
+#   MNEMUSH_DISABLE_FORGETTING=true     archive mode (never decay)
 #
 # The Pi extension additionally honors (set in shell or pi config):
-#   MNEME_PRUNE_ON_SESSION_END=apply  (default) — soft-delete up to N
-#   MNEME_PRUNE_ON_SESSION_END=dry    list candidates only, no write
-#   MNEME_PRUNE_ON_SESSION_END=off    skip the prune pass entirely
-#   MNEME_PRUNE_SESSION_LIMIT=5       cap candidates per session
+#   MNEMUSH_PRUNE_ON_SESSION_END=apply  (default) — soft-delete up to N
+#   MNEMUSH_PRUNE_ON_SESSION_END=dry    list candidates only, no write
+#   MNEMUSH_PRUNE_ON_SESSION_END=off    skip the prune pass entirely
+#   MNEMUSH_PRUNE_SESSION_LIMIT=5       cap candidates per session
 
 # ── Self-eval log bounds (v0.3) ─────────────────────────────────────────
-# The agent plugins write per-session NDJSON to ~/.mneme/eval/. These
+# The agent plugins write per-session NDJSON to ~/.mnemush/eval/. These
 # three caps keep it bounded; applied at session_end in order: TTL,
 # per-file line cap, file-count cap.
 [eval]
@@ -80,32 +80,32 @@ max_age_days = 30          # drop session files older than this (0 = keep all)
 max_entries_per_file = 5000 # keep the newest N lines per session file
 max_session_files = 30     # keep the N most-recent session files
 
-#   MNEME_EVAL_PRUNE_ON_SESSION_END=off   skip eval-log pruning at session_end
+#   MNEMUSH_EVAL_PRUNE_ON_SESSION_END=off   skip eval-log pruning at session_end
 
 # ── Multi-project isolation (v0.4) ─────────────────────────────────────────
 # Default project for writes (and read scope) when isolation is on.
 # Empty = no isolation; every memory is global / cross-project.
-# Env: MNEME_PROJECT=foo
+# Env: MNEMUSH_PROJECT=foo
 [project]
 default_project = ""
 
 # When true, reads (search, list, memory_next, memory_frontier) ignore
 # the default_project filter. Writes are still auto-tagged unless the
 # caller overrides. Equivalent to passing --all-projects on every CLI
-# read command. Env: MNEME_ALL_PROJECTS=1
+# read command. Env: MNEMUSH_ALL_PROJECTS=1
 cross_project_search = false
 
 # ── Optional semantic search (v1.0) ─────────────────────────────────────────
-# When enabled, `mneme embed` downloads a sentence-transformer model
+# When enabled, `mnemush embed` downloads a sentence-transformer model
 # (default all-MiniLM-L6-v2 quantized, ~25 MB) and stores per-memory
-# embeddings in the `memory_embedding` table. `mneme search --embed`
+# embeddings in the `memory_embedding` table. `mnemush search --embed`
 # blends cosine similarity with BM25 (final score =
 # bm25_weight * bm25 + embed_weight * cosine).
 #
-# Off by default. First call downloads the model to ~/.mneme/models/;
+# Off by default. First call downloads the model to ~/.mnemush/models/;
 # subsequent calls reuse the cached file.
 #
-# Env: MNEME_EMBEDDINGS_ENABLED=1
+# Env: MNEMUSH_EMBEDDINGS_ENABLED=1
 [embedding]
 enabled = false
 model = "sentence-transformers/all-MiniLM-L6-v2-q"

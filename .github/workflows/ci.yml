@@ -18,10 +18,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Build
         shell: bash
-        run: cargo build --manifest-path crates/mneme/Cargo.toml --release
+        run: cargo build --manifest-path crates/mnemush/Cargo.toml --release
       - name: Test
         shell: bash
-        run: cargo test --manifest-path crates/mneme/Cargo.toml
+        run: cargo test --manifest-path crates/mnemush/Cargo.toml
       - name: Lint
         # Windows runners are slow (fastembed pulls ONNX Runtime +
         # a long native dep chain). Clippy/fmt are covered on the
@@ -29,11 +29,11 @@ jobs:
         # being cancelled mid-build.
         if: runner.os != 'Windows'
         shell: bash
-        run: cargo clippy --manifest-path crates/mneme/Cargo.toml --lib --bins -- -D clippy::all
+        run: cargo clippy --manifest-path crates/mnemush/Cargo.toml --lib --bins -- -D clippy::all
       - name: Format check
         if: runner.os != 'Windows'
         shell: bash
-        run: cargo fmt --manifest-path crates/mneme/Cargo.toml --check
+        run: cargo fmt --manifest-path crates/mnemush/Cargo.toml --check
 
   ts:
     name: TypeScript (${{ matrix.os }})
@@ -63,8 +63,8 @@ jobs:
         # Rust binary and is covered by the mcp-smoke job)
         shell: bash
         run: |
-          (cd packages/mneme-client && npm test)
-          (cd packages/mneme-pi && npm test || true)
+          (cd packages/mnemush-client && npm test)
+          (cd packages/mnemush-pi && npm test || true)
 
   mcp-smoke:
     name: MCP smoke test (${{ matrix.os }})
@@ -80,15 +80,15 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Build mneme-mcp
+      - name: Build mnemush-mcp
         shell: bash
-        run: cargo build --manifest-path crates/mneme/Cargo.toml --release
+        run: cargo build --manifest-path crates/mnemush/Cargo.toml --release
       - name: Install binary
         shell: bash
         run: |
           # CARGO_HOME/bin is already on PATH (rust-toolchain adds it).
           mkdir -p "$CARGO_HOME/bin"
-          cp crates/mneme/target/release/mneme-mcp "$CARGO_HOME/bin/"
+          cp crates/mnemush/target/release/mnemush-mcp "$CARGO_HOME/bin/"
       - name: Run smoke test
         shell: bash
         run: python3 scripts/test-mcp.py
@@ -97,8 +97,8 @@ jobs:
         run: |
           # Install root deps (workspaces), build the TS packages
           # (integration loads dist/index.js), then run the opencode
-          # tests against the freshly-built mneme-mcp binary.
+          # tests against the freshly-built mnemush-mcp binary.
           npm install
           npm run build:ts
-          cd packages/mneme-opencode
+          cd packages/mnemush-opencode
           npm test

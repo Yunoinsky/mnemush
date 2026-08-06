@@ -5,7 +5,7 @@
 # 404s. This test uses Linux-style case-sensitive checks.
 
 set -e
-DOCS=$HOME/Project/mneme
+DOCS=$HOME/Project/mnemush
 FAIL=0
 
 # Extract (text -> target) pairs from each .md
