@@ -14,27 +14,35 @@ Mnemush is structured around three principles borrowed from human memory:
 
 ## Layers
 
+Three layers, mirroring insect neurobiology (v1.1+):
+
 ```
 ┌─────────────────────────────────────────────────────┐
-│ IDENTITY (graph-out, never decays)                  │
+│ IDENTITY (never decays, always injected)            │
 │  USER.md · PERSONA.md · CONSTITUTION.md            │
 └────────────────────┬────────────────────────────────┘
                      │ influences
                      ▼
 ┌─────────────────────────────────────────────────────┐
-│ LTM (graph, tunable decay)                          │
-│  Procedural ─── Semantic ─── Identity-mirror        │
-│       │              │                              │
-│       └─ edges: related / supports /                │
-│           contradicts / supersedes                  │
+│ NEUROPILS (内容层, 文件树)                           │
+│  任意 markdown 目录树 = 记忆权威源                    │
+│  grep/cat/tree 直接读, Git 版本化                    │
+│  import-tree/export-tree 双向同步                    │
 └────────────────────┬────────────────────────────────┘
-                     │ promotion (session-end review)
+         按需加载(import)│ neuropil 化(export + 摘要入口)
                      ▼
 ┌─────────────────────────────────────────────────────┐
-│ REVIEW QUEUE (transient)                            │
-│  needs_review=true items processed by LLM           │
+│ MUSHROOM_BODY (索引层, 主库 SQLite)                  │
+│  agent 经验: 全文 + 向量 + 边(常驻)                   │
+│  摘要入口: neuropil 化记忆留 title+摘要+路径           │
+│  wiki 动态索引: 按需局部加载(可再清)                  │
+│  跨簇关联边(related/supports/contradicts/supersedes) │
+│  巩固: consolidate/dream · 遗忘: decay/forget        │
+│  容量: 100MB 硬阈值驱逐链 + 冷归档                    │
 └─────────────────────────────────────────────────────┘
 ```
+
+**大脑映射**:neuropils = 皮层(内容就地存储),mushroom_body = 海马/蘑菇体(索引 + 关联)。文件树与主库是同一记忆的两层:内容在文件树,索引在 mushroom_body,边跨两层维护。
 
 ## Module map
 
@@ -43,17 +51,23 @@ Mnemush is structured around three principles borrowed from human memory:
 ```
 lib.rs              — public API surface + shared helpers (expand_tilde, init_tracing)
 schema.rs           — Memory, Edge, MemoryType, Category, EdgeType, parse helpers
-config.rs           — Config + 5-layer override (default / global / project / env / per-memory)
+config.rs           — Config + 5-layer override; capacity/embedding/project 各段
 store.rs            — SQLite wrapper, migrations, manual FTS5 sync
 memory.rs           — high-level ops: add / search / get / update / delete / list
 scanner.rs          — secret / PII pattern detection (called by add path)
 edge.rs             — edge ops: link / neighbors (recursive CTE BFS)
 graph.rs            — PageRank, label propagation, DOT / D3-JSON export (v0.3)
-forget.rs           — Ebbinghaus decay, active pruning, access boost
+forget.rs           — Ebbinghaus decay, active pruning, access boost, 遗忘痕迹
 identity.rs         — USER/PERSONA/CONSTITUTION file load + identity sync
 eval.rs             — self-eval NDJSON log maintenance (TTL / line / file caps)
 error.rs            — MnemushError + Result alias
-bin/mcp.rs          — MCP stdio server (5 tools)
+neuropils.rs        — 内容层: 文件树导入/导出, frontmatter + wikilink (v1.1)
+consolidate.rs      — LLM 巩固引擎: 6 类动作 + dream 采样 + 保护规则 (v1.2)
+llm.rs              — MiniMax M3 / DeepSeek chat client + usage 采集
+capacity.rs         — 容量驱逐链 / 摘要入口 degrade-restore / 冷压缩 (v1.3)
+concepts.rs         — 概念表: 排序 + title 压缩 (v1.4)
+embeddings.rs       — MiniMax embo-01 向量后端
+bin/mcp.rs          — MCP stdio server
 bin/cli.rs          — terminal CLI (clap)
 ```
 
@@ -61,8 +75,8 @@ bin/cli.rs          — terminal CLI (clap)
 
 ```
 mnemush-client/       — shared library to spawn mnemush binary + MCP RPC
-mnemush-pi/           — Pi extension (4 hooks + 3 tools)
-mnemush-opencode/     — OpenCode plugin (4 hooks + 3 tools)
+mnemush-pi/           — Pi extension: 概念表注入(session_start + 写入刷新) + memory 工具
+mnemush-opencode/     — OpenCode plugin (hooks + tools)
 ```
 
 ## Data flow
@@ -250,10 +264,20 @@ CREATE TABLE schema_version (
 │   ├── PERSONA.md
 │   └── CONSTITUTION.md
 ├── config.toml
-├── mnemush.db
-├── mnemush.db-wal            (WAL journal, transient)
-└── pending.jsonl           (v0.2: identity reflection proposals, transient)
+├── mnemush.db              (mushroom_body: memory/edge/embedding/FTS/event)
+├── mnemush.db-consolidate.json  (consolidate 增量位置, 随库隔离)
+├── neuropils/              (默认 neuropil 目录, v1.1)
+│   ├── archive/            (冷归档: 合并页 + tar.gz, v1.3)
+│   └── <project>/…md
+├── eval/                   (LLM 响应存档 + self-eval NDJSON)
+└── pending.jsonl           (identity reflection proposals, transient)
 ```
+
+### 容量与归档(Storage 之上, v1.3)
+
+- **物理上限**: `[capacity] max_db_mb`(默认 100)由 `PRAGMA page_count×page_size` 触发(add 时),驱逐收敛按活数据估算(content + 活跃向量 + 活跃边)。
+- **摘要入口**: neuropil 化记忆降级为前 2 句摘要 + `context=neuropil:<path>` 标记,全文在文件树。FTS 同步(旧全文不再命中)。
+- **冷归档**: 30 天双条件(入口无命中 + 文件未改)→ 合并归档页 + tar.gz 打包。
 
 ## Memory types
 
@@ -262,6 +286,7 @@ CREATE TABLE schema_version (
 | **Identity** | user profile / agent persona | never | "user prefers Rust over Go" |
 | **Procedural** | skills (how to do X) | normal | SKILL.md body |
 | **Semantic** | facts, decisions, preferences, knowledge, episodic | normal | "auth uses jose not jsonwebtoken" |
+| **ForgetTrace** | 遗忘痕迹: 记录一次主动遗忘(被遗忘者/原因) | normal, 可再遗忘 | "[forgotten] old FTP details — 过时" (v1.2) |
 
 Episodic is not a separate type — it's `Semantic` with `category=Episodic` + a timestamp.
 
@@ -274,9 +299,11 @@ Episodic is not a separate type — it's `Semantic` with `category=Episodic` + a
 | `contradicts` | bidirectional | A and B are in conflict |
 | `supersedes` | source→target | A replaces B (memory evolution) |
 
+额外 provenance 标记: `consolidate:link`(巩固建边)、`consolidate:insight`(顿悟连边)、`neuropil:wikilink`/`neuropil:copath`(文件树 wikilink/共现边)。
+
 ## Tunable parameters
 
-See [config.example.toml](docs/config.example.toml) for the full schema. The 4 most-tuned:
+See [config.example.toml](docs/config.example.toml) for the full schema. The most-tuned:
 
 | Parameter | Default | What it does |
 |---|---|---|
@@ -284,6 +311,9 @@ See [config.example.toml](docs/config.example.toml) for the full schema. The 4 m
 | `forgetting.prune_confidence_threshold` | 0.1 | below this → prune candidate |
 | `forgetting.disable_forgetting` | false | true = archive mode (never forget) |
 | `search.weight_importance` | 0.2 | how much importance affects ranking |
+| `capacity.max_db_mb` | 100.0 | 物理上限(add 触发驱逐链) |
+| `capacity.cold_days` | 30 | neuropil 冷判定天数 |
+| `capacity.dream_sample_m` | 3 | dream 采样延伸度(≤10·m² 条/轮) |
 
 ## Performance targets
 

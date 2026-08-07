@@ -129,3 +129,33 @@ This file captures the why behind non-obvious choices. For broader context, see 
 **Cost**: three migration arms in `store.rs::migrate`; the v0.2→v0.3 arm adds the five columns. Half-migrated DBs (schema_version stale relative to actual columns) are handled idempotently via `pragma_table_info` checks before each `ADD COLUMN`.
 
 **Alternatives rejected**: separate `task` table (duplicates the memory pipeline), JSON blob on `memory` (not queryable, no indexing).
+
+
+## D15. Why the file tree is the content layer and the DB is the index (v1.1)
+
+The database is not the source of truth for knowledge — the file tree is.
+Neuropils (any markdown directory tree) hold the authoritative full text;
+the mushroom_body DB holds only what retrieval needs: FTS + vectors + edges
++ summary entries. Rationale: files are grep-able, Git-versionable, and
+editable by the agent's native tools; the DB is a derived index that can be
+rebuilt (`import-tree`) at any time. This inverts the usual "DB as truth"
+design: knowledge lives where agents already read/write, and the DB is a
+cache of associations.
+
+## D16. Why capacity uses a physical cap with logical convergence (v1.3)
+
+`max_db_mb` is checked on `PRAGMA page_count` (physical), but eviction
+converges on a logical live-data estimate (content + active vectors + active
+edges). Why not converge on physical size: SQLite under WAL +
+auto_vacuum=0 does not shrink the file on DELETE, so a physical-only loop
+never terminates. VACUUM (after actual eviction, gated on freelist) reclaims
+disk. Soft-deleted rows are recoverable for 30 days; hard-delete cascades
+their edges (FK ON DELETE CASCADE).
+
+## D17. Why the concept table is an index, not content (v1.4)
+
+The injected concept list carries title + category only (~40 rows, ~1.2k
+tokens), not full bodies. This mirrors prefrontal retrieval cues: the agent
+learns *what exists* and extracts *details* on demand via search. Full-text
+injection would scale poorly (token cost grows with the library) and blur
+the distinction between "knowing what's there" and "recalling it".

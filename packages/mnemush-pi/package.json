@@ -12,7 +12,7 @@
   ],
   "scripts": {
     "build": "tsc",
-    "test": "echo 'no tests yet'"
+    "test": "node --test"
   },
   "dependencies": {
     "mnemush-client": "*"

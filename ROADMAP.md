@@ -43,6 +43,29 @@ Each bullet ends with **Done when:** so progress is unambiguous.
 - Auto-merge near-duplicate memories. **DONE** — when a new note/skill/insight/episodic memory is Jaccard-similar (>= `auto_merge_min_sim`, default 0.6) to an existing one, the old one is soft-deleted and its edges retargeted to the new. Catches evolving-document re-captures that exact content-hash dedup misses (the 2026-08-06 "10x using-superpowers" incident). Decision/Correction/Preference keep supersede edges. Config: `[edges] auto_merge_enabled` / `auto_merge_min_sim`. 3 unit tests.
 - Cross-machine sync (Git-based). **DONE** — `mnemush sync init|export|import` (Git as transport, mnemush as codec). Sync dir layout: `MANIFEST.json` (schema_version + counts), `memory.json` (all rows), `edges.json`, `identity/` (verbatim USER/PERSONA/CONSTITUTION + pending.jsonl), `embeddings/` (one JSON per (model,memory_id)). `init` runs `git init` + commits; user does `git remote add`/`push`/`pull` themselves. `import` refuses snapshots from newer schema_version; reports per-memory conflicts (local updated_at newer) but leaves those rows for manual resolution. Verified: fresh export of the live home DB (138 memories) round-trips. Fresh-DB migration bug fixed along the way (schema_version table accumulated rows via INSERT OR REPLACE; now INSERT-then-UPDATE keeps a single row).
 
+## v1.1.0 — Neuropils 文件树记忆 ✅ Released 2026-08-07
+
+- 任意目录树即记忆: `mnemush import-tree <dir> --project <name>` / `export-tree`。frontmatter 解析、wikilink → 边、增量同步。文件 = 权威源, mnemush 维护关系。
+- 架构命名: 内容层 = **neuropils**, 索引层 = **mushroom_body**。
+
+## v1.2.0 — LLM 驱动巩固 + 主动遗忘 ✅ Released 2026-08-07
+
+- `mnemush consolidate`: 增量收集 → LLM(MiniMax M3 / DeepSeek fallback)→ 6 类动作 update/link/merge/insight/decay/forget。保护规则(importance≥0.7/never_prune/identity/7天)。
+- `mnemush dream`: 每日全量巩固 + 遗忘高峰。**遗忘痕迹**(forget_trace): 忘掉什么本身也是信息, 可再遗忘, 防 trace-of-trace。
+- 主动遗忘生物映射: 双阈值(低 confidence 易忘, 高 confidence 需强证据)。
+
+## v1.3.0 — 容量管理 + neuropil 归档 ✅ Released 2026-08-07
+
+- 100MB 物理硬阈值 + 驱逐链(清可再生 wiki 索引 → 低分软删 → VACUUM)。
+- **neuropil 化**: 可结构化记忆 export 到文件树, 主库留摘要入口(语义可命中)。
+- **neuropil 压缩**: 30 天双条件冷判定 → 合并归档页 + tar.gz 打包。
+- dream 三合一: 遗忘 + neuropilize 复核 + 冷压缩 + 容量报告。**dream 采样滚动覆盖**(5 最新 + 5 随机种子 + 2 级图延伸 ≤90 条/轮)。
+
+## v1.4.0 — 概念表(context priming index)✅ Released 2026-08-07
+
+- `mnemush concepts`: importance×recency×access top-N + title 压缩。
+- Pi 插件 session_start 注入 + 写入时刷新 —— agent 知道记忆里有什么可搜(前额叶检索线索类比)。
+
 ## Out of scope
 
 - Cloud hosting — local-first only.

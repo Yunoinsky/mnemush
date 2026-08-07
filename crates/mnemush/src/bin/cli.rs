@@ -87,6 +87,14 @@ enum Cmd {
         #[arg(long)]
         suggest: bool,
     },
+    /// List top concepts (memory index) for agent priming.
+    Concepts {
+        #[arg(long, default_value_t = 40)]
+        limit: usize,
+        /// text (default) or json.
+        #[arg(long)]
+        format: Option<String>,
+    },
     /// Search memories.
     Search {
         query: String,
@@ -507,6 +515,21 @@ fn main() -> anyhow::Result<()> {
                 );
                 for e in &s.errors {
                     println!("  ⚠ {e}");
+                }
+            }
+        }
+        Cmd::Concepts { limit, format } => {
+            let api = MemoryApi::new(&store, &config);
+            let list = mnemush::concepts::concepts(&api, limit)?;
+            match format.as_deref() {
+                Some("json") => {
+                    let n = list.len();
+                    println!("{}", serde_json::json!({"concepts": list, "count": n}).to_string())
+                }
+                _ => {
+                    for c in &list {
+                        println!("· {} ({})", c.title, c.category);
+                    }
                 }
             }
         }

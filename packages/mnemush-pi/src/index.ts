@@ -45,7 +45,12 @@ interface ExtensionAPI {
     execute: (toolCallId: string, args: Record<string, unknown>) => Promise<ToolResult<T>>;
   }) => void;
   on: (event: string, handler: (event: unknown, ctx: unknown) => void | Promise<void>) => void;
-  sendMessage?: (msg: string) => void;
+  // pi runtime's sendMessage takes a CustomMessage object {customType, content,
+  // display, details} — NOT a plain string (a string would inject empty content).
+  sendMessage?: (
+    message: { customType: string; content: string; display?: boolean; details?: unknown },
+    options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+  ) => void;
   sendStatus?: (status: string, ttlMs?: number) => void;
 }
 
@@ -137,6 +142,76 @@ async function writeEvalLog(entry: {
   return next;
 }
 
+/**
+ * 概念表(context priming index)注入文本构建 + CLI 加载。
+ * 与 Task 1 的 `mnemush concepts --format json` 输出字段一致。
+ */
+
+export interface ConceptEntry {
+  title: string;
+  category: string;
+  importance: number;
+  score: number;
+}
+
+/** 概念表注入文本: 唤起索引(详情走 memory 工具)。空 → 空串(不注入)。 */
+export function buildConceptInject(concepts: ConceptEntry[]): string {
+  if (concepts.length === 0) return "";
+  const lines = concepts.map((c) => `· ${c.title} (${c.category})`).join("\n");
+  return `[memory index] ${concepts.length} concepts (detail via memory tool):\n${lines}`;
+}
+
+/**
+ * 解析 `mnemush concepts --format json` 输出: 兼容 spec 的
+ * `{"concepts": [...], "count": N}`(主用)与旧版裸数组。无效输入 → []。
+ */
+export function parseConceptsJson(raw: string): ConceptEntry[] {
+  let data: unknown;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  const arr = Array.isArray(data) ? data : (data as { concepts?: unknown[] } | null)?.concepts ?? [];
+  return arr.filter(
+    (e): e is ConceptEntry =>
+      !!e && typeof e.title === "string" && typeof e.category === "string",
+  );
+}
+
+/**
+ * 调 `mnemush concepts --limit N --format json`, 解析 → 注入文本。
+ * 失败/空 → null(静默, 不阻塞会话)。
+ */
+export async function loadConceptInject(limit = 40): Promise<string | null> {
+  const { spawn } = await import("node:child_process");
+  return new Promise((resolve) => {
+    let out = "";
+    let settled = false;
+    const finish = (v: string | null) => {
+      if (!settled) {
+        settled = true;
+        resolve(v);
+      }
+    };
+    const proc = spawn("mnemush", ["concepts", "--limit", String(limit), "--format", "json"], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    proc.stdout.on("data", (c: Buffer) => (out += c.toString()));
+    proc.stderr.on("data", () => { /* swallow */ });
+    const timer = setTimeout(() => proc.kill("SIGTERM"), 3000);
+    proc.on("error", () => {
+      clearTimeout(timer);
+      finish(null);
+    });
+    proc.on("exit", () => {
+      clearTimeout(timer);
+      finish(buildConceptInject(parseConceptsJson(out.trim())));
+    });
+  });
+}
+
+
 export default function activate(pi: ExtensionAPI): void {
   // ── session_start: connect to mnemush-mcp ─────────────────────
   pi.on("session_start", async () => {
@@ -156,6 +231,8 @@ export default function activate(pi: ExtensionAPI): void {
       // could review for missing links. Lets the user (or the agent)
       // notice when there's reflection work to do.
       void surfaceReflectCandidateCount();
+      // 概念表注入: 唤起索引写入 agent 上下文(连接成功后 fire-and-forget)。
+      void injectConceptIndex();
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       console.error(`[mnemush] failed to connect: ${msg}`);
@@ -209,6 +286,49 @@ export default function activate(pi: ExtensionAPI): void {
       // Silent.
     }
   }
+
+  /**
+   * 概念表注入: spawn `mnemush concepts --limit 40 --format json`, 解析后
+   * 以 custom message 注入 LLM 上下文(display=false → 不刷聊天 UI)。
+   * 失败/空 → 静默。fire-and-forget, 不阻塞会话。
+   */
+  async function injectConceptIndex(): Promise<void> {
+    try {
+      const inject = await loadConceptInject();
+      if (!inject) return;
+      pi.sendMessage?.({
+        customType: "memoryIndex",
+        content: inject,
+        display: false,
+      });
+    } catch {
+      // 注入失败静默 — 会话照常进行。
+    }
+  }
+
+  /**
+   * 检测 memory 写入工具(任何 surface 前缀): memory add/save/action 写入 → 刷新注入。
+   * event 结构跨 pi 版本有差异(toolCall.name / toolName / tool_name), 防御性提取。
+   */
+  function isMemoryWriteTool(name: string, args?: unknown): boolean {
+    const n = name ?? "";
+    if (n === "memory" || n === "mnemush_memory") {
+      return (args as { action?: string } | undefined)?.action === "add";
+    }
+    return /^(mnemush_)?memory_(add|save_search_result|action_create|action_update)/.test(n);
+  }
+
+  /** 写入检测 + 刷新: after_tool_call(旧名) 与 tool_result(pi 0.83) 都注册。 */
+  const refreshConceptIndexOnWrite = async (event: unknown): Promise<void> => {
+    const e = event as
+      | { toolCall?: { name?: string }; toolName?: string; tool_name?: string; input?: unknown; args?: unknown }
+      | undefined;
+    const tool = e?.toolCall?.name ?? e?.toolName ?? e?.tool_name ?? "";
+    if (!isMemoryWriteTool(tool, e?.input ?? e?.args)) return;
+    await injectConceptIndex();
+  };
+  pi.on("after_tool_call", refreshConceptIndexOnWrite);
+  pi.on("tool_result", refreshConceptIndexOnWrite);
 
   // ── session_end: prune + disconnect ─────────────────────────────
   // Active forgetting: before disconnecting, run a prune pass.
@@ -444,6 +564,7 @@ export default function activate(pi: ExtensionAPI): void {
           source: "auto_heuristic" as never,
         });
         pi.sendStatus?.("🧠 saved (remember)", 3000);
+        void injectConceptIndex(); // 启发式写入不走 tool_result 事件, 主动刷新概念表
       } else if (looksLikeCorrection(text)) {
         await client.memoryAdd({
           title: text.slice(0, 80),
@@ -453,6 +574,7 @@ export default function activate(pi: ExtensionAPI): void {
           source: "auto_heuristic" as never,
         });
         pi.sendStatus?.("🧠 saved (correction)", 3000);
+        void injectConceptIndex(); // 同上: 写入成功后刷新注入
       }
     } catch (e) {
       console.error(`[mnemush] auto-capture failed: ${e}`);

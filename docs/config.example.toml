@@ -132,3 +132,4 @@ max_db_mb = 100.0           # physical DB cap in MB (checked on add)
 cold_days = 30              # neuropil cold: no hits for N days + file unchanged
 entry_summary_chars = 300   # summary entries truncate content to N chars
 eviction_batch = 100        # eviction processes N entries per batch
+dream_sample_m = 3           # dream 采样: 每种子点随机取 ≤m 邻居, 延伸 2 级(≤10·m² 条/轮)

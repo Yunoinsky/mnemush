@@ -1,5 +1,20 @@
 # Changelog
 
+## v1.4.0 (2026-08-07)
+
+### Added
+
+**概念表(context priming index)—— agent 会话唤起索引。** 给 agent 注入记忆库的
+top 概念摘要(零 LLM), 让其在会话开始时就知道记忆库里有什么可搜。
+
+- `mnemush concepts [--limit N] [--format json]` — 活跃记忆按
+  importance × recency × access 排序取 top-N, title 压缩(剥前缀 + 48 字符截断)。
+- **pi 插件注入**: `session_start` 连接成功后 fire-and-forget 调
+  `mnemush concepts --limit 40 --format json`, 以 `[memory index] N concepts`
+  custom message 注入 agent 上下文(不刷聊天 UI); `after_tool_call` /
+  `tool_result` 检测 memory 写入(memory add/save/action) → 刷新注入。
+  失败/空静默, 不阻塞会话。
+
 ## v1.3.0 (2026-08-07)
 
 ### Added
