@@ -15,6 +15,7 @@
 //! Binaries (`mnemush` CLI, `mnemush-mcp` server) are in `bin/`.
 
 pub mod backup;
+pub mod capacity;
 pub mod config;
 pub mod consolidate;
 pub mod edge;

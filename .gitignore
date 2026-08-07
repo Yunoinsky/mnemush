@@ -37,3 +37,9 @@ Thumbs.db
 .pi-subagents/
 scripts/__pycache__/
 bing2.html
+
+# Local agent/subagent scratch (contains personal paths)
+.pi-subagents/
+.superpowers/
+.mnemon/
+eval/

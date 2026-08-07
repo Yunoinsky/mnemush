@@ -14,6 +14,24 @@
 
 ## Status
 
+**v1.3.0 (2026-08-07)** — capacity management: 100MB physical-size trigger +
+eviction + neuropilization + cold archive, folded into the nightly dream pass.
+
+- `mnemush dream` is now three-in-one: forgetting + neuropilize review +
+  cold compression, ending with a capacity report line
+  (`容量: X/Y MB`).
+- `mnemush status` gained a capacity line: DB size vs. cap + neuropil entry
+  count.
+- Eviction chain on add when the physical DB size (page_count × page_size)
+  exceeds the cap: regenerable wiki indexes → low-value memories
+  (importance ≥ 0.7 / never_prune / identity exempt) → VACUUM (reclaims disk
+  pages; convergence is judged on the logical live-data estimate).
+- `neuropilize` action (dream review) archives the full body to
+  `~/.mnemush/neuropils/<path>` (frontmatter + fulltext) and degrades the DB
+  row to a 2-sentence summary entry (`context=neuropil:<path>`).
+- Cold entries (no hits + untouched for 30 days) merge into per-project
+  archive pages packed as `archive.tar.gz` during dream.
+
 **v1.2.0 (2026-08-07)** — LLM-driven consolidation + active forgetting.
 
 - `mnemush consolidate [--dry-run|--suggest] [--project] [--since]` — incremental
@@ -34,7 +52,7 @@
 - Earlier: v0.4 backup/restore + multi-project isolation + schema-migration
   trait; v0.3 graph analytics + eval.
 
-151 Rust tests green at HEAD (133 lib + 18 bin). Install via
+184 Rust tests green at HEAD (166 lib + 18 bin). Install via
 `git clone` + `./scripts/install.sh` (publish to crates.io/npm/Homebrew
 deferred — see ROADMAP).
 

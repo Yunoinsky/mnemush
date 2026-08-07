@@ -13,7 +13,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = __filename.replace(/\/[^/]+$/, "");
 
 // Path to the dist (built artifact under test)
-const PI_DIST = "$HOME/Project/mnemush/packages/mnemush-pi/dist/index.js";
+const PI_DIST = `${process.env.HOME}/Project/mnemush/packages/mnemush-pi/dist/index.js`;
 
 let passed = 0, failed = 0;
 function check(name, ok, detail = "") {
@@ -64,7 +64,7 @@ function loadExtension() {
   try {
     // Resolve "mnemush-client" to the project's copy
     const modulePath = require_fn.resolve("mnemush-client", { paths: [
-      "$HOME/Project/mnemush/packages/mnemush-pi",
+      `${process.env.HOME}/Project/mnemush/packages/mnemush-pi`,
     ] });
     // Bust the require cache so each test gets a fresh module
     delete require_fn.cache[PI_DIST];
@@ -77,7 +77,7 @@ function loadExtension() {
     const origResolve = Module._resolveFilename;
     Module._resolveFilename = function (request, parent, ...rest) {
       if (request === "mnemush-client") {
-        return "$HOME/Project/mnemush/packages/mnemush-client/dist/index.js";
+        return `${process.env.HOME}/Project/mnemush/packages/mnemush-client/dist/index.js`;
       }
       return origResolve.call(this, request, parent, ...rest);
     };
@@ -257,7 +257,7 @@ async function run() {
 
     // Run the actual mnemush binary against this HOME
     const r = spawn(
-      "$HOME/.cargo/bin/mnemush",
+      `${process.env.HOME}/.cargo/bin/mnemush`,
       ["eval", "stats"],
       { env: { ...process.env, HOME: tmpHome, MNEMUSH_DATA_DIR: join(tmpHome, ".mnemush") },
         encoding: "utf8" },

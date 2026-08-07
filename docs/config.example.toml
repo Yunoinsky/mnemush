@@ -122,3 +122,13 @@ embed_weight = 0.3
 [edges]
 auto_merge_enabled = true
 auto_merge_min_sim = 0.6
+
+# ── Capacity management (v1.3) ─────────────────────────────────────────
+# DB size cap with eviction, neuropil cold judgment, summary entry
+# truncation. Search hits refresh last_accessed_at; cold judgment uses
+# it to decide an entry has had no hits for cold_days.
+[capacity]
+max_db_mb = 100.0           # physical DB cap in MB (checked on add)
+cold_days = 30              # neuropil cold: no hits for N days + file unchanged
+entry_summary_chars = 300   # summary entries truncate content to N chars
+eviction_batch = 100        # eviction processes N entries per batch

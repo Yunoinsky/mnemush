@@ -22,6 +22,7 @@ pub struct Config {
     pub eval: EvalConfig,
     pub embedding: EmbeddingConfig,
     pub project: ProjectConfig,
+    pub capacity: CapacityConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -239,6 +240,39 @@ impl Default for EmbeddingConfig {
 pub struct ProjectConfig {
     pub default_project: Option<String>,
     pub cross_project_search: bool,
+}
+
+/// Capacity management (v1.3). Used by the capacity tasks: physical
+/// DB size cap with eviction, neuropil cold judgment, and summary
+/// entry truncation. Search hits refresh `last_accessed_at`, which
+/// cold judgment reads to decide an entry has had no hits for
+/// `cold_days`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CapacityConfig {
+    /// 物理上限 MB(add 时检查, 超限触发驱逐)。
+    pub max_db_mb: f64,
+    /// neuropil 冷判定: 入口多少天无命中 + 文件未改。
+    pub cold_days: i64,
+    /// 摘要入口截取字符数(规则截取 content 前 N 字符)。
+    pub entry_summary_chars: usize,
+    /// 驱逐每批处理条数。
+    pub eviction_batch: usize,
+    /// dream 采样延伸度: 每个种子点随机取 ≤m 个邻居, 延伸 2 级。
+    /// 每轮覆盖 ≤10*m*m 条(5 最新 + 5 随机种子)。
+    pub dream_sample_m: usize,
+}
+
+impl Default for CapacityConfig {
+    fn default() -> Self {
+        Self {
+            max_db_mb: 100.0,
+            cold_days: 30,
+            entry_summary_chars: 300,
+            eviction_batch: 100,
+            dream_sample_m: 3,
+        }
+    }
 }
 
 impl Config {

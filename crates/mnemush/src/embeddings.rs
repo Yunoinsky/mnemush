@@ -103,6 +103,27 @@ struct RemoteEmbedder {
     model: String,
 }
 
+/// MiniMax API key: env(MINIMAX_API_KEY / MINIMAX_CN_API_KEY /
+/// MINIMAX_TOKEN_PLAN_KEY)→ ~/.mmx/config.json api_key 兜底。
+fn minimax_key() -> Option<String> {
+    for v in ["MINIMAX_API_KEY", "MINIMAX_CN_API_KEY", "MINIMAX_TOKEN_PLAN_KEY"] {
+        if let Ok(k) = std::env::var(v) {
+            return Some(k);
+        }
+    }
+    let mmx = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+        .join(".mmx")
+        .join("config.json");
+    if let Ok(t) = std::fs::read_to_string(&mmx) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&t) {
+            if let Some(k) = v.get("api_key").and_then(|x| x.as_str()) {
+                return Some(k.to_string());
+            }
+        }
+    }
+    None
+}
+
 impl RemoteEmbedder {
     fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
         if texts.is_empty() {
@@ -168,10 +189,10 @@ impl Embedder {
     /// the local fastembed model.
     pub fn new(model_id: &str) -> Result<Self> {
         if let Some(rest) = model_id.strip_prefix(MINIMAX_PREFIX) {
-            let api_key = std::env::var("MINIMAX_API_KEY")
-                .map_err(|_| MnemushError::Other(
-                    "minimax backend requires MINIMAX_API_KEY env var".into(),
-                ))?;
+            // 与 llm.rs 一致: 官方 cn 环境变量名 + ~/.mmx/config.json 兜底
+            let api_key = minimax_key().ok_or_else(|| MnemushError::Other(
+                "minimax backend requires MINIMAX_API_KEY / MINIMAX_CN_API_KEY env or ~/.mmx/config.json".into(),
+            ))?;
             let model = if rest.is_empty() {
                 MINIMAX_MODEL.to_string()
             } else {

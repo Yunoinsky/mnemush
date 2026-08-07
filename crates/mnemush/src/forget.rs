@@ -496,7 +496,7 @@ pub fn isolate_hard_delete(
         // Keep the FTS5 index rowid-aligned: capture the rowid BEFORE
         // deleting the memory row, then remove the orphaned FTS row.
         // Without this, rowid reuse made search return wrong content.
-        // (2026-08-06 fix; see memory.rs reindex comment.)
+        // (2026-08-06 fix.)
         let fts_rowid: Option<i64> = tx
             .query_row("SELECT rowid FROM memory WHERE id = ?1", rusqlite::params![id], |r| r.get(0))
             .optional()?;

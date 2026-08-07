@@ -1,5 +1,51 @@
 # Changelog
 
+## v1.3.0 (2026-08-07)
+
+### Added
+
+**容量管理 —— 100MB 物理触发阈值 + 驱逐链 + neuropil 化 + 压缩(dream 三合一)。**
+DB 物理大小(`page_count × page_size`)超 `[capacity] max_db_mb`(默认 100MB)即触发驱逐链;驱逐收敛按逻辑活数据估算(内容 + 活跃向量 + 活跃边)判断,驱逐时 VACUUM 回收物理空间。
+
+- **驱逐链**(add 触发, 超限才进入): ① 清可再生的外部知识库动态索引(wiki project 层)→
+  ② 仍超 → 按价值/成本评分(importance×confidence×时效 / 成本)软删低分记忆
+  (importance≥0.7 / never_prune / identity 豁免)→ ③ VACUUM 回收物理空间。
+  估算按活跃数据(内容 + 活跃向量 + 活跃边),驱逐后必收敛。
+- **摘要入口**(neuropil 化): 记忆降级为前 2 句摘要 + `context=neuropil:<path>`
+  路径标记,全文移出主库;FTS 同步更新(旧全文不再命中),可恢复。
+- **neuropil 化动作**: `mnemush dream` 中 LLM 复核规则初筛候选
+  (category=note/skill 且非摘要入口),输出 `neuropilize` 动作 → 原内容落盘
+  `~/.mnemush/neuropils/<path>`(frontmatter + 全文)+ 主库降级摘要入口。
+- **neuropil 压缩**(dream 尾部): 双条件冷判定(入口 30 天无命中 + 文件 30 天
+  未改)→ 按 project 合并归档页 → tar.gz 打包移出活动区。
+  注: 当前实现是**归档副本 + 摘要索引**——全文副本移入 tar.gz 归档(全文不丢),
+  主库保留摘要入口供检索/恢复, 原记忆不删除; **原文删除 + 全文入包**(压缩后
+  主库连摘要一并清除, 检索直接走压缩包)列为后续项。
+- **dream 三合一**: `mnemush dream` = 遗忘巩固 + neuropilize 复核 + 冷压缩 +
+  容量报告(结束打印 `容量: X/Y MB`, Y = `[capacity] max_db_mb`)。
+- `mnemush status` 新增 capacity 行: `capacity: X/Y MB (neuropil 入口 N)`。
+
+### Fixed
+
+- neuropilize 之前只降级主库不落盘文件树(导出步骤缺失)→ 逐条写文件到
+  neuropils 文件树;写失败(含路径越界)记录错误,不阻塞降级动作。
+
+### Added(后续)
+
+- **dream 采样滚动覆盖**: 10 种子(5 最新 + 5 全库随机)+ 每种子 2 级图延伸
+  (每级 ≤`[capacity] dream_sample_m` 随机邻居, 默认 3)→ 每轮 ≤10·m·m 条
+  (去重后实际更少)。不再卡在最新批次, 随机+图延伸滚动覆盖全库(含 wiki
+  记忆, 由 LLM 决定 forget/neuropilize)。零依赖 SplitMix64 PRNG。
+- **LLM 用量采集**: `dream`/`consolidate` 结束后打印
+  `llm: N prompt + M completion (推理 R), 合计 T tokens`;LLM 原始响应存档
+  附带 usage。LLM 超时 60s→180s、max_tokens 16000→65536(推理模型 +
+  采样候选多)。
+- **embeddings key 兜底**: `minimax-embo-01` 后端 key 支持
+  `MINIMAX_CN_API_KEY`/`MINIMAX_TOKEN_PLAN_KEY`/`~/.mmx/config.json`
+  (与 llm 一致, 不再只认 `MINIMAX_API_KEY`)。
+- **驱逐报告**: dream 尾部驱逐不再静默, 报告 `(驱逐: wiki 索引 N 条, 低分 M 条)`。
+
+
 ## v1.2.0 (2026-08-07)
 
 ### Added
@@ -53,7 +99,7 @@ markdown 文件树为权威源(Agent 可用 grep/cat/tree 直接读、Git 版本
 
 - `mnemush import-tree [dir] --project <name>`: 扫描目录树(默认
   `~/.mnemush/neuropils/`),按 title 增量 add/update(幂等,编辑即更新)。
-  任意目录树都是 neuropil(external-wiki 即既有实例)。
+  任意目录树都是 neuropil(既有知识库即实例)。
 - `mnemush export-tree [dir] --project <name>`: 记忆落盘为
   `<category>/<title>.md` 文件树(往返稳定)。
 - **mushroom_body 边**: frontmatter `links:` + 正文 `[[wikilink]]` 与

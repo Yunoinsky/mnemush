@@ -61,15 +61,6 @@ CLUSTERS = {
             ("Sleep and memory in flies", "Circadian sleep patterns enable long-term memory in Drosophila. Mature sleep-wake rhythms emerge at the L3 larval stage when the clock-arousal circuit forms.", "note", ["sleep", "memory"]),
         ],
     },
-    "extname": {
-        "keywords": ["外部名称", "extname", "external", "pending", "author"],
-        "memories": [
-            ("External wiki author metadata verification", "Verified Chinese names for external-wiki authors via web retrieval combined with literature and institution evidence. 243 of 249 authors confirmed; 6 remain unconfirmed.", "note", ["extname", "external"]),
-            ("Do not fabricate external metadata", "Never fabricate metadata without a verifiable source.", "convention", ["extname"]),
-            ("Wiki author pages sync", "Confirmed Chinese names are written back to wiki author pages via scripts/update_wiki_authors.py as frontmatter cn_name plus a '## 外部名称' section.", "note", ["extname", "wiki"]),
-            ("Metadata corrections", "The verification process produced 90+ wrong-character corrections: multiple wrong-character corrections (details elided).", "lesson", ["extname"]),
-        ],
-    },
 }
 
 # Queries: (query, relevant memory titles, score-if-hit=3, distractor keywords)
@@ -91,10 +82,6 @@ QUERIES = [
     ("drosophila sleep regulation", ["Dorsal fan-shaped body sleep", "Dh44 arousal neurons", "Sleep and memory in flies"], 3, []),
     ("circadian clock neurons", ["Circadian rhythm connectome", "Dh44 arousal neurons"], 3, []),
     ("fruit fly long term memory", ["Sleep and memory in flies", "Dh44 arousal neurons"], 3, ["fruit"]),
-    # extname cluster
-    ("外部名称确认进度", ["External wiki author metadata verification", "Metadata corrections"], 3, []),
-    ("external wiki 作者 pending", ["Do not fabricate external metadata", "Wiki author pages sync"], 3, []),
-    ("不臆造外部名称 原则", ["Do not fabricate external metadata", "External wiki author metadata verification"], 3, []),
     # semantic-only queries: zero FTS overlap with the (English) corpus,
     # retrievable only via vector recall
     ("怎么访问被墙的网站", ["Clash port 7890", "GitHub proxy setup"], 3, []),

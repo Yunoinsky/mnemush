@@ -502,8 +502,8 @@ fn main() -> anyhow::Result<()> {
             let (s, n) = mnemush::consolidate::run_consolidate(&api, &opts)?;
             if !dry_run && !suggest {
                 println!(
-                    "dream: {n} candidates | +{} updated, +{} links, +{} merged, +{} insight, -{} decayed, -{} forgot | {} error(s)",
-                    s.updated, s.links, s.merged, s.insights, s.decayed, s.forgot, s.errors.len()
+                    "dream: {n} candidates | +{} updated, +{} links, +{} merged, +{} insight, -{} decayed, -{} forgot, {} neuropilized | {} error(s)",
+                    s.updated, s.links, s.merged, s.insights, s.decayed, s.forgot, s.neuropilized, s.errors.len()
                 );
                 for e in &s.errors {
                     println!("  ⚠ {e}");
@@ -568,6 +568,11 @@ fn main() -> anyhow::Result<()> {
                 println!("🔗 {} related memory(ies):", r.conflicts.len());
                 for c in r.conflicts {
                     println!("  - {} ({})", c.title, c.category.as_str());
+                }
+            }
+            if let Ok(rep) = mnemush::capacity::enforce_capacity(&api) {
+                if rep.evicted_wiki + rep.evicted_low > 0 {
+                    println!("容量驱逐: 已清 wiki 索引 {} 条, 低分记忆 {} 条 (库 {:.0}/{:.0} MB)", rep.evicted_wiki, rep.evicted_low, rep.db_mb, rep.limit_mb);
                 }
             }
         }
@@ -715,6 +720,14 @@ fn main() -> anyhow::Result<()> {
                 "  pending proposals:    {} (run `mnemush identity list-pending`)",
                 pending_proposals
             );
+            let size = mnemush::capacity::db_size_mb(&store).unwrap_or(0.0);
+            let limit = config.capacity.max_db_mb;
+            let np_count: i64 = store.conn.query_row(
+                "SELECT COUNT(*) FROM memory WHERE deleted_at IS NULL AND context LIKE 'neuropil:%'",
+                [],
+                |r| r.get(0),
+            )?;
+            println!("  capacity:    {size:.0}/{limit:.0} MB (neuropil 入口 {np_count})");
         }
         Cmd::EdgeDecay => {
             let config = mnemush::config::Config::load()?;

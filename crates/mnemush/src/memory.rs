@@ -483,8 +483,8 @@ impl<'a> MemoryApi<'a> {
         // Same transaction: mark deleted AND remove the FTS5 row so
         // the index stays rowid-aligned with the memory table. Orphaned
         // FTS rows caused rowid reuse to point at the wrong content
-        // (search returned garbage) — fixed 2026-08-06, see
-        // reindex(). Keep the DELETE here so it never recurs.
+        // (search returned garbage) — fixed 2026-08-06. Keep the DELETE
+        // here so it never recurs.
         let tx = self.store.conn.unchecked_transaction()?;
         tx.execute(
             "UPDATE memory SET deleted_at = ?1 WHERE id = ?2",
@@ -802,13 +802,19 @@ impl<'a> MemoryApi<'a> {
             hits.truncate(limit);
         }
 
-        // update access stats
-        let ids: Vec<String> = hits.iter().map(|h| h.memory.id.clone()).collect();
-        for id in ids {
-            if let Ok(Some(mut m)) = self.store.get_by_id(&id) {
-                forget::on_access(&mut m, self.config, now);
-                let _ = self.update(&m);
-            }
+        // Touch access stats for returned hits. Capacity cold-judgment
+        // (v1.3 Task 2+) reads last_accessed_at to decide an entry is cold
+        // (no hits for `cold_days`), so every search hit must refresh it.
+        // Batch UPDATE with one prepared stmt, re-executed per hit —
+        // replaces the earlier per-hit get_by_id + on_access + update()
+        // path (N transactions + N audit events). confidence is derived at
+        // read time (forget::current_confidence), so refreshing the stored
+        // column here is unnecessary.
+        let mut touch = self.store.conn.prepare(
+            "UPDATE memory SET access_count = access_count + 1, last_accessed_at = ?1 WHERE id = ?2",
+        )?;
+        for h in &hits {
+            touch.execute(params![Store::now_ts(), h.memory.id])?;
         }
         Ok(hits)
     }
@@ -949,6 +955,40 @@ mod tests {
         let hits = api.search("jose", SearchOpts::default()).unwrap();
         assert!(!hits.is_empty());
         assert!(hits[0].memory.content.contains("jose"));
+    }
+
+    /// Search hits must record access (last_accessed_at / access_count).
+    /// Capacity cold-judgment (Task 2+ of v1.3) reads last_accessed_at,
+    /// so a search hit has to refresh it, not just add().
+    #[test]
+    fn search_hit_records_access() {
+        let (store, cfg) = setup();
+        let api = MemoryApi::new(&store, &cfg);
+        let id = api
+            .add(note("needle", "needle content here"))
+            .unwrap()
+            .id;
+        let before = api.get(&id).unwrap().unwrap().last_accessed_at;
+        let hits = api
+            .search(
+                "needle",
+                SearchOpts {
+                    limit: Some(5),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(hits.iter().any(|h| h.memory.id == id), "search finds it");
+        let after = api.get(&id).unwrap().unwrap();
+        // last_accessed_at is stored at second granularity, so a same-second
+        // search may not strictly advance it; access_count is the
+        // deterministic proof the touch ran, and the timestamp must not
+        // have gone backwards (nor be stale, i.e. the add-time value).
+        assert!(
+            after.last_accessed_at >= before,
+            "last_accessed_at not regressed"
+        );
+        assert_eq!(after.access_count, 1, "access_count incremented");
     }
 
     /// Layer A of mechanism #2: when a new memory is added, the

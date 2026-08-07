@@ -1,6 +1,7 @@
 //! llm —— 聊天客户端(MiniMax M3 主, DeepSeek V4 Flash fallback)。
 //!
-//! 供 consolidate(记忆巩固)等 LLM 驱动功能使用。60s 超时,
+//! 供 consolidate(记忆巩固)等 LLM 驱动功能使用。180s 超时
+//! (dream 采样候选 ≤90 条 + 推理模型耗时高),
 //! MiniMax 失败自动 fallback DeepSeek;两者都失败 → 报错。
 
 use std::time::Duration;
@@ -66,7 +67,7 @@ fn minimax_key() -> Option<String> {
 
 fn post_json(url: &str, bearer: &str, body: &serde_json::Value) -> Result<serde_json::Value> {
     let agent = AgentBuilder::new()
-        .timeout(Duration::from_secs(60))
+        .timeout(Duration::from_secs(180))
         .build();
     let resp = agent
         .post(url)
@@ -93,13 +94,42 @@ pub fn parse_chat_response(body: &str) -> Result<String> {
         })
 }
 
-/// 聊天调用: MiniMax 优先, fallback DeepSeek。
-pub fn chat(messages: &[ChatMsg]) -> Result<String> {
+/// LLM 调用用量(prompt/completion/reasoning tokens)。
+#[derive(Debug, Default, Clone, Copy, serde::Serialize)]
+pub struct LlmUsage {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub reasoning_tokens: u64,
+}
+
+/// 从 OpenAI 风格响应提取 usage(缺失时返回默认)。
+pub fn parse_usage(body: &str) -> LlmUsage {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(body) else {
+        return LlmUsage::default();
+    };
+    let g = |k: &str| v.pointer(&format!("/usage/{k}")).and_then(|x| x.as_u64()).unwrap_or(0);
+    let c = |k: &str| {
+        v.pointer("/usage/completion_tokens_details")
+            .and_then(|d| d.get(k))
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0)
+    };
+    LlmUsage {
+        prompt_tokens: g("prompt_tokens"),
+        completion_tokens: g("completion_tokens"),
+        reasoning_tokens: c("reasoning_tokens"),
+    }
+}
+
+/// 聊天调用: MiniMax 优先, fallback DeepSeek。返回 (文本, 用量)。
+pub fn chat_with_usage(messages: &[ChatMsg]) -> Result<(String, LlmUsage)> {
     let payload = |model: &str| {
         serde_json::json!({
             "model": model,
             "messages": messages.iter().map(|m| serde_json::json!({"role": m.role, "content": m.content})).collect::<Vec<_>>(),
-            "max_tokens": 16000,
+            // max_tokens 覆盖推理链 + 动作输出; dream 采样 ≤90 条候选时
+            // 推理(v4-flash reasoning_content)耗 token 多, 16000 会截断
+            "max_tokens": 65536,
             // MiniMax M3 官方确认的重复/循环问题缓解: 低温度 + 重复惩罚
             // (MiniMax-AI/MiniMax-M3#20 ALLALLALL 循环; #7 agent loops)
             "temperature": 0.7,
@@ -112,7 +142,7 @@ pub fn chat(messages: &[ChatMsg]) -> Result<String> {
         if let Ok(v) = post_json(MINIMAX_CHAT_URL, &key, &payload(&minimax_model())) {
             if let Ok(text) = parse_chat_response(&v.to_string()) {
                 if !text.trim().is_empty() {
-                    return Ok(text);
+                    return Ok((text, parse_usage(&v.to_string())));
                 }
             }
         }
@@ -120,11 +150,17 @@ pub fn chat(messages: &[ChatMsg]) -> Result<String> {
     // 2) DeepSeek fallback
     if let Ok(key) = std::env::var("DEEPSEEK_API_KEY") {
         let v = post_json(DEEPSEEK_CHAT_URL, &key, &payload(&deepseek_model()))?;
-        return parse_chat_response(&v.to_string());
+        let usage = parse_usage(&v.to_string());
+        return Ok((parse_chat_response(&v.to_string())?, usage));
     }
     Err(crate::error::MnemushError::Other(
         "llm: no usable key (MINIMAX_API_KEY / DEEPSEEK_API_KEY)".into(),
     ))
+}
+
+/// 兼容旧调用方: 只返回文本。
+pub fn chat(messages: &[ChatMsg]) -> Result<String> {
+    chat_with_usage(messages).map(|(text, _)| text)
 }
 
 #[cfg(test)]

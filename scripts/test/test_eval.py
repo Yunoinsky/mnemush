@@ -24,7 +24,7 @@ def test_stats_empty_dir():
     with tempfile.TemporaryDirectory() as tmp:
         os.environ["HOME"] = tmp
         r = subprocess.run(
-            ["$HOME/.cargo/bin/mnemush", "eval", "stats"],
+            [os.path.expanduser("~/.cargo/bin/mnemush"), "eval", "stats"],
             capture_output=True, text=True, timeout=10,
         )
         assert r.returncode == 0, f"failed: {r.stderr}"
@@ -60,7 +60,7 @@ def test_stats_with_entries():
         ])
 
         r = subprocess.run(
-            ["$HOME/.cargo/bin/mnemush", "eval", "stats"],
+            [os.path.expanduser("~/.cargo/bin/mnemush"), "eval", "stats"],
             capture_output=True, text=True, timeout=10,
         )
         assert r.returncode == 0, f"failed: {r.stderr}"
@@ -86,7 +86,7 @@ def test_dump_ndjson():
         ])
 
         r = subprocess.run(
-            ["$HOME/.cargo/bin/mnemush", "eval", "dump"],
+            [os.path.expanduser("~/.cargo/bin/mnemush"), "eval", "dump"],
             capture_output=True, text=True, timeout=10,
         )
         assert r.returncode == 0
@@ -114,7 +114,7 @@ def test_stats_since_filter():
         ])
 
         r = subprocess.run(
-            ["$HOME/.cargo/bin/mnemush", "eval", "stats", "--since", "1d"],
+            [os.path.expanduser("~/.cargo/bin/mnemush"), "eval", "stats", "--since", "1d"],
             capture_output=True, text=True, timeout=10,
         )
         assert r.returncode == 0
