@@ -16,6 +16,7 @@
 
 pub mod backup;
 pub mod config;
+pub mod consolidate;
 pub mod edge;
 pub mod embeddings;
 pub mod error;
@@ -23,6 +24,7 @@ pub mod eval;
 pub mod forget;
 pub mod graph;
 pub mod identity;
+pub mod llm;
 pub mod memory;
 pub mod migrations;
 pub mod scanner;

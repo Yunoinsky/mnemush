@@ -75,6 +75,9 @@ pub enum Category {
     Note,
     /// Time-stamped event / session highlight.
     Episodic,
+    /// Forget-trace: meta-memory recording that another memory was
+    /// forgotten ("forgetting itself is information").
+    ForgetTrace,
     /// Skill / how-to.
     Skill,
     /// Identity-related (user profile / persona).
@@ -93,6 +96,7 @@ impl Category {
             Category::Convention => "convention",
             Category::ToolQuirk => "tool_quirk",
             Category::Note => "note",
+            Category::ForgetTrace => "forget_trace",
             Category::Episodic => "episodic",
             Category::Skill => "skill",
             Category::Identity => "identity",
@@ -109,6 +113,7 @@ impl Category {
             "preference" => Category::Preference,
             "convention" => Category::Convention,
             "tool_quirk" | "toolquirk" => Category::ToolQuirk,
+            "forget_trace" => Category::ForgetTrace,
             "episodic" => Category::Episodic,
             "skill" => Category::Skill,
             "identity" => Category::Identity,
@@ -137,6 +142,8 @@ pub enum Source {
     SearchResult,
     /// Imported from a markdown file tree (`mnemush import-tree`).
     FileTree,
+    /// Created by LLM-driven consolidation (`mnemush consolidate`).
+    Consolidate,
 }
 
 impl Source {
@@ -150,6 +157,7 @@ impl Source {
             Source::SessionImport => "session_import",
             Source::SearchResult => "search_result",
             Source::FileTree => "file_tree",
+            Source::Consolidate => "consolidate",
         }
     }
 }

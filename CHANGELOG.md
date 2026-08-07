@@ -1,5 +1,48 @@
 # Changelog
 
+## v1.2.0 (2026-08-07)
+
+### Added
+
+**consolidate — LLM 驱动的记忆巩固 + 主动遗忘。** 参考 Karpathy LLM Wiki
+策略(增量编译)+ 钟毅团队主动遗忘研究(独立于记忆形成的主动擦除)+
+睡眠期巩固/顿悟。
+
+- `mnemush consolidate [--dry-run|--suggest] [--project <name>] [--since <ts>]`:
+  收集自上次以来的新记忆 → LLM(MiniMax M3,quota 耗尽 fallback DeepSeek)
+  输出 JSON 动作 → 自动执行。
+- **巩固动作**: update(修订)/ link(建边)/ merge(合并重复, 边重定向)/
+  insight(顿悟: 跨簇新模式 → insight 记忆 + 边)。
+- **主动遗忘动作**(生物映射): decay(confidence 降权, 突触削弱类比,
+  下限 0.05, 渐进) / forget(软删);双阈值(低 confidence 易遗忘,
+  高 confidence 需明确矛盾/过时证据)。
+- **保护规则**(Raf/MAPK 类比): importance≥0.7 / never_prune / identity /
+  7 天内创建 → 禁止 decay/forget。
+- **遗忘痕迹(forget-trace)**: forget 本身也是信息 —— 每次主动遗忘留下
+  forget_trace 元记忆(被遗忘者/时间/摘要/原因),可检索可分析;
+  trace 可被未来 dream 再遗忘(不设保护),且不产生 trace-of-trace(防递归)。
+- **增量位置**: ~/.mnemush/consolidate.json(last_ts),重跑幂等;
+  dream 全量扫描不推进位置(独立调度)。
+- **审计**: memory_event(consolidate_*)+ LLM 原始响应存档
+  ~/.mnemush/eval/consolidate-<ts>.json。
+- `mnemush dream [--dry-run|--suggest] [--project]`: 每日全量巩固,
+  更强遗忘强度(睡眠期高峰类比),建议 cron 每日一次。
+
+### Fixed
+
+- LLM 短 id(前 8 字符)传入精确匹配的软删/更新 → 静默失败;所有动作
+  先 resolve 成完整 UUID 再执行,并补短 id 回归测试。
+- UUID v7 同毫秒创建前缀相同 → `LIKE` 前缀解析可能命中错误记忆;多匹配
+  时保守跳过,不冒险猜。
+- merge 边重定向撞 `UNIQUE(source,target,type)`(auto-link 同目标边)→
+  去重重定向,不再崩溃。
+- `--dry-run` 推进增量位置(候选未处理却被跳过)→ dry-run/suggest/dream
+  均不写状态。
+- 防重复参数(temperature 0.7 + frequency/presence penalty 0.3)缓解
+  MiniMax M3 官方确认的循环/重复问题;prompt 候选展示完整 id;
+  支持 `MINIMAX_CN_API_KEY` / `MINIMAX_TOKEN_PLAN_KEY` 环境变量。
+
+
 ## v1.1.0 (2026-08-07)
 
 ### Added

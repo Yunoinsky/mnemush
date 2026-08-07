@@ -58,6 +58,35 @@ enum Cmd {
         #[arg(long)]
         project: Option<String>,
     },
+    /// Consolidate memories: LLM-driven integration + active forgetting.
+    Consolidate {
+        /// Project filter (default: all projects).
+        #[arg(long)]
+        project: Option<String>,
+        /// Print parsed actions without executing or advancing position.
+        #[arg(long)]
+        dry_run: bool,
+        /// Print the raw LLM suggestion JSON without executing.
+        #[arg(long)]
+        suggest: bool,
+        /// Only consider memories created after this unix timestamp
+        /// (default: last consolidated position).
+        #[arg(long)]
+        since: Option<i64>,
+    },
+    /// Dream: full-corpus consolidation with stronger forgetting
+    /// (sleep-replay analogy). Same engine as consolidate.
+    Dream {
+        /// Project filter (default: all projects).
+        #[arg(long)]
+        project: Option<String>,
+        /// Print parsed actions without executing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Print the raw LLM suggestion JSON without executing.
+        #[arg(long)]
+        suggest: bool,
+    },
     /// Search memories.
     Search {
         query: String,
@@ -431,6 +460,55 @@ fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|| mnemush::neuropils::PROJECT.to_string());
             let s = mnemush::neuropils::export_tree(&api, &d, &proj)?;
             println!("exported {} memories to {}", s.written, d.display());
+        }
+        Cmd::Consolidate {
+            project,
+            dry_run,
+            suggest,
+            since,
+        } => {
+            let api = MemoryApi::new(&store, &config);
+            let opts = mnemush::consolidate::RunOpts {
+                project,
+                dry_run,
+                suggest,
+                since,
+                dream: false,
+            };
+            let (s, n) = mnemush::consolidate::run_consolidate(&api, &opts)?;
+            if !dry_run && !suggest {
+                println!(
+                    "consolidate: {n} candidates | +{} updated, +{} links, +{} merged, +{} insight, -{} decayed, -{} forgot | {} error(s)",
+                    s.updated, s.links, s.merged, s.insights, s.decayed, s.forgot, s.errors.len()
+                );
+                for e in &s.errors {
+                    println!("  ⚠ {e}");
+                }
+            }
+        }
+        Cmd::Dream {
+            project,
+            dry_run,
+            suggest,
+        } => {
+            let api = MemoryApi::new(&store, &config);
+            let opts = mnemush::consolidate::RunOpts {
+                project,
+                dry_run,
+                suggest,
+                since: None,
+                dream: true,
+            };
+            let (s, n) = mnemush::consolidate::run_consolidate(&api, &opts)?;
+            if !dry_run && !suggest {
+                println!(
+                    "dream: {n} candidates | +{} updated, +{} links, +{} merged, +{} insight, -{} decayed, -{} forgot | {} error(s)",
+                    s.updated, s.links, s.merged, s.insights, s.decayed, s.forgot, s.errors.len()
+                );
+                for e in &s.errors {
+                    println!("  ⚠ {e}");
+                }
+            }
         }
         Cmd::Search {
             query,
@@ -1189,20 +1267,9 @@ fn main() -> anyhow::Result<()> {
                 println!("(no matching memories)");
                 return Ok(());
             }
-            let titles: Vec<&str> = target.iter().map(|m| m.title.as_str()).collect();
-            let contents: Vec<String> = target.iter().map(|m| m.content.clone()).collect();
-            let content_refs: Vec<&str> = contents.iter().map(String::as_str).collect();
-            // Embed title + content concatenated (best signal).
-            let joined: Vec<String> = target
-                .iter()
-                .map(|m| format!("{} {} {}", m.title, m.content, m.tags.join(" ")))
-                .collect();
-            let joined_refs: Vec<&str> = joined.iter().map(String::as_str).collect();
-            let _ = titles; // unused if we use joined
-            let _ = content_refs;
-            // Batch embed + commit in chunks so a hung/failed API call
-            // keeps previously embedded memories (resume-safe; a later
-            // run skips memories that already have an embedding).
+            // Embed title + content concatenated (best signal), batched so a
+            // hung/failed API call keeps previously embedded memories
+            // (resume-safe; a later run skips memories that already have one).
             let mut count = 0usize;
             for chunk in target.chunks(100) {
                 let texts: Vec<String> = chunk

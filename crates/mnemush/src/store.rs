@@ -121,12 +121,15 @@ CREATE INDEX IF NOT EXISTS idx_event_created ON memory_event(created_at DESC);
 /// A handle to the SQLite database.
 pub struct Store {
     pub conn: Connection,
+    /// On-disk path (None for in-memory/test stores).
+    pub db_path: Option<std::path::PathBuf>,
 }
 
 impl Store {
     /// Open (or create) the database at the given path.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
-        if let Some(parent) = path.as_ref().parent() {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let conn = Connection::open(path)?;
@@ -135,7 +138,10 @@ impl Store {
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.pragma_update(None, "temp_store", "MEMORY")?;
-        let mut store = Self { conn };
+        let mut store = Self {
+            conn,
+            db_path: Some(path.to_path_buf()),
+        };
         store.migrate()?;
         Ok(store)
     }
@@ -144,7 +150,10 @@ impl Store {
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        let mut store = Self { conn };
+        let mut store = Self {
+            conn,
+            db_path: None,
+        };
         store.migrate()?;
         Ok(store)
     }
@@ -550,6 +559,7 @@ fn parse_category(s: &str) -> Result<Category> {
         Preference => "preference",
         Convention => "convention",
         ToolQuirk => "tool_quirk",
+        ForgetTrace => "forget_trace",
         Episodic => "episodic",
         Skill => "skill",
         Identity => "identity",
@@ -567,6 +577,7 @@ fn parse_source(s: &str) -> Result<Source> {
         SessionImport => "session_import",
         SearchResult => "search_result",
         FileTree => "file_tree",
+        Consolidate => "consolidate",
     })
 }
 

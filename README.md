@@ -14,17 +14,29 @@
 
 ## Status
 
-**v0.4.0 (2026-08-05)** — polish: backup/restore, multi-project isolation, schema-migration trait.
+**v1.2.0 (2026-08-07)** — LLM-driven consolidation + active forgetting.
 
-Backup: `mnemush backup` produces a gzipped tarball of `~/.mnemush/` (mnemush.db via SQLite online backup API for WAL consistency, plus config.toml and identity/, optionally eval/). `mnemush restore [-i FILE] [--target DIR] [--force] [--yes]` unpacks with downgrade protection.
+- `mnemush consolidate [--dry-run|--suggest] [--project] [--since]` — incremental
+  integration + active forgetting: LLM (MiniMax M3, DeepSeek fallback) reads new
+  memories and emits actions — update / link / merge / insight (顿悟) / decay /
+  forget — guarded by protection rules (importance ≥ 0.7, never_prune, identity,
+  < 7 days). Incremental position in `~/.mnemush/consolidate.json`.
+- `mnemush dream [--dry-run|--suggest]` — full-corpus pass with stronger
+  forgetting (sleep-replay analogy); for cron. Does not advance the incremental
+  position.
+- Forgetting leaves a `forget_trace` meta-memory (forgetting itself is
+  information): searchable, analyzable, itself forgettable later, no
+  trace-of-trace recursion.
+- v1.1: `mnemush import-tree <dir> --project <name>` / `export-tree` — any
+  markdown file tree is a neuropil; wikilinks become mushroom-body graph edges.
+- v1.0.1: semantic recall — vector top-K merges into search candidates (Chinese ↔
+  English zero-overlap queries now surface).
+- Earlier: v0.4 backup/restore + multi-project isolation + schema-migration
+  trait; v0.3 graph analytics + eval.
 
-Multi-project: opt-in via `MNEMUSH_PROJECT=foo` — writes auto-tag, reads scope to that project. `--all-projects` on search/list or `MNEMUSH_ALL_PROJECTS=1` bypasses. Backward-compatible: without the env, behavior matches v0.3.
-
-Schema migration: `Migration` trait in `crates/mnemush/src/migrations.rs`; registry walks in order. Each version bump is a struct impl + registry append — no `Store::migrate` changes for future bumps.
-
-114 Rust + 31 OpenCode + 36 client + 26 hook tests as of HEAD. Install via `git clone` + `./scripts/install.sh` (publish to crates.io/npm/Homebrew deferred — see ROADMAP).
-
-See [ROADMAP.md](ROADMAP.md) for what's done and what's next.
+151 Rust tests green at HEAD (133 lib + 18 bin). Install via
+`git clone` + `./scripts/install.sh` (publish to crates.io/npm/Homebrew
+deferred — see ROADMAP).
 
 ## Quick start
 
@@ -52,6 +64,11 @@ mnemush graph export -f dot -o graph.dot   # Graphviz
 
 # v0.3: what am I committed to? (agent-facing; also via MCP tools)
 mnemush eval stats                  # self-eval log summary
+
+# v1.2: LLM-driven consolidation + active forgetting
+mnemush consolidate --dry-run       # preview what the LLM would do
+mnemush consolidate                 # integrate new memories + forget stale ones
+mnemush dream                       # nightly full-corpus pass (stronger forgetting)
 ```
 
 ### For Pi
