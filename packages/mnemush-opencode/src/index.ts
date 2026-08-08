@@ -18,6 +18,8 @@ import {
   isMnemushTool,
   looksLikeCorrection,
   looksLikeRemember,
+  runSessionEndMaintenance,
+  appendEvalLog,
 } from "mnemush-client";
 
 interface OpenCodeTool {
@@ -144,28 +146,6 @@ const plugin: OpenCodePlugin = ({ client: oc }) => {
   // keeping `mnemush eval stats` covering both surfaces. result_count
   // stays 0 (OpenCode doesn't expose parsed result sizes here).
   let ocSessionId = `opencode-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  let evalWriteChain: Promise<void> = Promise.resolve();
-  function writeEvalLog(entry: Record<string, unknown>): Promise<void> {
-    evalWriteChain = evalWriteChain.then(async () => {
-      try {
-        const fs = await import("node:fs/promises");
-        const path = await import("node:path");
-        const os = await import("node:os");
-        const dataDir = process.env.MNEMUSH_DATA_DIR ?? path.join(os.homedir(), ".mnemush");
-        const evalDir = path.join(dataDir, "eval");
-        await fs.mkdir(evalDir, { recursive: true });
-        await fs.appendFile(
-          path.join(evalDir, `${entry.session}.ndjson`),
-          JSON.stringify(entry) + "\n",
-          "utf8",
-        );
-      } catch (e) {
-        // Best-effort — never break the main flow.
-        console.error(`[mnemush] eval log write failed: ${e}`);
-      }
-    });
-    return evalWriteChain;
-  }
 
   /**
    * Register a tool with self-eval instrumentation. Wraps execute()
@@ -182,7 +162,7 @@ const plugin: OpenCodePlugin = ({ client: oc }) => {
         try {
           const r = await inner(args, ctx);
           const typed = r as { isError?: boolean; content?: Array<{ text?: string }> } | undefined;
-          void writeEvalLog({
+          void appendEvalLog({
             ts: Math.floor(t0 / 1000),
             session: ocSessionId,
             agent: "opencode",
@@ -195,7 +175,7 @@ const plugin: OpenCodePlugin = ({ client: oc }) => {
           });
           return r;
         } catch (e) {
-          void writeEvalLog({
+          void appendEvalLog({
             ts: Math.floor(t0 / 1000),
             session: ocSessionId,
             agent: "opencode",
@@ -249,43 +229,9 @@ const plugin: OpenCodePlugin = ({ client: oc }) => {
   oc.on("session.deleted", async () => {
     if (!client) return;
     try {
-      const { spawn: spawnChild } = await import("node:child_process");
-      const limit = process.env.MNEMUSH_PRUNE_SESSION_LIMIT ?? "5";
-      // Run the same trio as Pi's session_end: prune --apply,
-      // edge-decay, process-needs-review. Default ON, MNEMUSH_*_ON_SESSION_END=off
-      // can disable. Hard-delete (--isolate) is NEVER auto-run.
-      await new Promise<void>((resolve) => {
-        const proc = spawnChild("mnemush", ["prune", "--apply", "--limit", limit], {
-          stdio: ["ignore", "ignore", "ignore"],
-        });
-        proc.on("exit", () => resolve());
-        proc.on("error", () => resolve());
-      });
-      await new Promise<void>((resolve) => {
-        const proc = spawnChild("mnemush", ["edge-decay"], {
-          stdio: ["ignore", "ignore", "ignore"],
-        });
-        proc.on("exit", () => resolve());
-        proc.on("error", () => resolve());
-      });
-      await new Promise<void>((resolve) => {
-        const proc = spawnChild("mnemush", ["process-needs-review"], {
-          stdio: ["ignore", "ignore", "ignore"],
-        });
-        proc.on("exit", () => resolve());
-        proc.on("error", () => resolve());
-      });
-      // eval-log maintenance: same trio pattern, gated by
-      // MNEMUSH_EVAL_PRUNE_ON_SESSION_END=off to opt out.
-      if ((process.env.MNEMUSH_EVAL_PRUNE_ON_SESSION_END ?? "on") !== "off") {
-        await new Promise<void>((resolve) => {
-          const proc = spawnChild("mnemush", ["eval", "prune", "--apply"], {
-            stdio: ["ignore", "ignore", "ignore"],
-          });
-          proc.on("exit", () => resolve());
-          proc.on("error", () => resolve());
-        });
-      }
+      // 共享维护四件套(prune/edge-decay/needs-review/eval-prune),
+      // 门控与 Pi 插件一致(MNEMUSH_*_ON_SESSION_END)。硬删永不自动。
+      await runSessionEndMaintenance();
     } catch (e) {
       console.error(`[mnemush] session.deleted failed: ${e}`);
     }

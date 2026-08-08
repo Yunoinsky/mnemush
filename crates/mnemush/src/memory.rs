@@ -152,7 +152,7 @@ impl<'a> MemoryApi<'a> {
             self.auto_link_tx(&tx, &memory, &conflicts)?;
         }
         self.store
-            .log_event("memory_add", Some(&memory.id), None, None, "agent")?;
+            .log_event_tx(&tx, "memory_add", Some(&memory.id), None, None, "agent")?;
         tx.commit()?;
 
         Ok(AddResult {
@@ -174,25 +174,7 @@ impl<'a> MemoryApi<'a> {
         if fts_query.is_empty() {
             return Ok(vec![]);
         }
-
-        let mut stmt = tx.prepare(
-            r#"SELECT m.* FROM memory m
-               JOIN memory_fts fts ON fts.rowid = m.rowid
-               WHERE memory_fts MATCH ?1
-                 AND m.deleted_at IS NULL
-                 AND m.id != ?2
-               ORDER BY rank
-               LIMIT ?3"#,
-        )?;
-        let rows = stmt.query_map(
-            params![fts_query, exclude_id, limit as i64],
-            Store::row_to_memory,
-        )?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
+        fts_match(tx, &fts_query, exclude_id, limit)
     }
 
     fn auto_link_tx(
@@ -310,10 +292,7 @@ impl<'a> MemoryApi<'a> {
                         "UPDATE memory SET deleted_at = ?1 WHERE id = ?2",
                         params![now, &old.id],
                     )?;
-                    tx.execute(
-                        "DELETE FROM memory_fts WHERE rowid = (SELECT rowid FROM memory WHERE id = ?1)",
-                        params![&old.id],
-                    )?;
+                    Store::delete_fts_for_tx(tx, &old.id)?;
                     self.store.log_event_tx(
                         tx,
                         "memory_auto_merge",
@@ -345,25 +324,12 @@ impl<'a> MemoryApi<'a> {
                     // Fetch a small over-fetch window so the jaccard filter
                     // doesn't starve the limit on noisy content.
                     let fetch = (weak_limit * 3).max(5);
-                    let mut stmt = tx.prepare(
-                        r#"SELECT m.* FROM memory m
-                           JOIN memory_fts fts ON fts.rowid = m.rowid
-                           WHERE memory_fts MATCH ?1
-                             AND m.deleted_at IS NULL
-                             AND m.id != ?2
-                           ORDER BY rank
-                           LIMIT ?3"#,
-                    )?;
-                    let rows = stmt.query_map(
-                        params![fts_query, new_mem.id, fetch as i64],
-                        Store::row_to_memory,
-                    )?;
+                    let rows = fts_match(tx, &fts_query, &new_mem.id, fetch)?;
                     let mut added = 0usize;
-                    for r in rows {
+                    for other in rows {
                         if added >= weak_limit {
                             break;
                         }
-                        let other = r?;
                         // Skip if the new memory and the candidate are
                         // already linked (e.g. by topic_key match in step 1).
                         // The link_in_tx call is idempotent but a no-op write
@@ -472,7 +438,7 @@ impl<'a> MemoryApi<'a> {
         let tx = self.store.conn.unchecked_transaction()?;
         Store::update_memory_tx(&tx, &finalized)?;
         self.store
-            .log_event("memory_update", Some(&m.id), None, None, "agent")?;
+            .log_event_tx(&tx, "memory_update", Some(&m.id), None, None, "agent")?;
         tx.commit()?;
         Ok(())
     }
@@ -490,7 +456,7 @@ impl<'a> MemoryApi<'a> {
             "UPDATE memory SET deleted_at = ?1 WHERE id = ?2",
             params![now, id],
         )?;
-        tx.execute("DELETE FROM memory_fts WHERE rowid = (SELECT rowid FROM memory WHERE id = ?1)", params![id])?;
+        Store::delete_fts_for_tx(&tx, id)?;
         self.store
             .log_event_tx(&tx, "memory_soft_delete", Some(id), None, None, "agent")?;
         tx.commit()?;
@@ -516,46 +482,25 @@ impl<'a> MemoryApi<'a> {
     /// Priority: `due_at` ASC (nulls last), then `created_at` ASC.
     /// Excludes completed and abandoned memories.
     pub fn memory_next(&self) -> Result<Option<Memory>> {
-        let project = self.effective_read_filter();
-        let project_clause = if project.is_some() {
-            " AND m.project = ?1"
-        } else {
-            ""
-        };
-        let sql = format!(
-            r#"SELECT m.* FROM memory m
-               WHERE m.deleted_at IS NULL
-                 AND m.status = 'active'
-                 AND m.category != 'identity'{project_clause}
-               ORDER BY
-                 CASE WHEN m.due_at IS NULL THEN 1 ELSE 0 END ASC,
-                 m.due_at ASC,
-                 m.created_at DESC,
-                 m.id DESC
-               LIMIT 1"#,
-        );
-        let mut stmt = self.store.conn.prepare(&sql)?;
-        let mut rows = if let Some(p) = project {
-            stmt.query_map(rusqlite::params![p], Store::row_to_memory)?
-        } else {
-            stmt.query_map([], Store::row_to_memory)?
-        };
-        match rows.next() {
-            Some(row) => Ok(Some(row?)),
-            None => Ok(None),
-        }
+        Ok(self.active_actions(Some(1))?.into_iter().next())
     }
 
     /// Return all active actions, sorted by priority (due_at ASC,
     /// nulls last; then created_at DESC). Excludes completed /
     /// abandoned.
     pub fn memory_frontier(&self) -> Result<Vec<Memory>> {
+        self.active_actions(None)
+    }
+
+    /// Shared SQL for `memory_next` / `memory_frontier`.
+    fn active_actions(&self, limit: Option<usize>) -> Result<Vec<Memory>> {
         let project = self.effective_read_filter();
         let project_clause = if project.is_some() {
             " AND m.project = ?1"
         } else {
             ""
         };
+        let limit_clause = limit.map_or(String::new(), |n| format!(" LIMIT {n}"));
         let sql = format!(
             r#"SELECT m.* FROM memory m
                WHERE m.deleted_at IS NULL
@@ -565,7 +510,7 @@ impl<'a> MemoryApi<'a> {
                  CASE WHEN m.due_at IS NULL THEN 1 ELSE 0 END ASC,
                  m.due_at ASC,
                  m.created_at DESC,
-                 m.id DESC"#,
+                 m.id DESC{limit_clause}"#,
         );
         let mut stmt = self.store.conn.prepare(&sql)?;
         let rows = if let Some(p) = project {
@@ -746,7 +691,9 @@ impl<'a> MemoryApi<'a> {
         //
         // ponytail: bounded (1 hop, decay 0.5) and gated on the existing
         // max_neighbor_hops config. Set max_neighbor_hops=0 to disable
-        // without changing code.
+        // without changing code. Revisit (make hop/decay configurable)
+        // when search recall feels too narrow but dropping the cap loses
+        // useful neighbor hits.
         if self.config.edges.max_neighbor_hops >= 1 && !hits.is_empty() {
             const DECAY: f32 = 0.5;
             let mut extra: std::collections::HashMap<String, (Memory, f32)> =
@@ -835,6 +782,31 @@ pub(crate) fn sanitize_fts_query(input: &str, max_tokens: usize) -> String {
         .take(max_tokens)
         .collect::<Vec<_>>()
         .join(" OR ")
+}
+
+/// FTS5 top-`limit` memories matching `query`, excluding `exclude_id`.
+/// Shared by conflict detection and the weak auto-link layer.
+fn fts_match(
+    tx: &rusqlite::Transaction,
+    query: &str,
+    exclude_id: &str,
+    limit: usize,
+) -> Result<Vec<Memory>> {
+    let mut stmt = tx.prepare(
+        r#"SELECT m.* FROM memory m
+           JOIN memory_fts fts ON fts.rowid = m.rowid
+           WHERE memory_fts MATCH ?1
+             AND m.deleted_at IS NULL
+             AND m.id != ?2
+           ORDER BY rank
+           LIMIT ?3"#,
+    )?;
+    let rows = stmt.query_map(params![query, exclude_id, limit as i64], Store::row_to_memory)?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
 }
 
 /// Crude Jaccard similarity over word sets.
@@ -1354,9 +1326,6 @@ mod tests {
         );
     }
 }
-
-#[cfg(test)]
-mod debug_tests {}
 
 #[cfg(test)]
 mod action_field_tests {

@@ -1,5 +1,29 @@
 # Changelog
 
+## v1.5.0 (2026-08-14)
+
+### Added
+
+**DeepSeek Harness (DSH) 插件 —— `packages/mnemush-dsh`。** 原生 Cordis 插件
+(与 `@deepseek-ai/dsh-tool-bash` 同契约), 让 mnemush 记忆层在 DSH 里以一等
+工具形态工作。
+
+- 注册全部 16 个 memory 工具(`memory_add` / `memory_search` / `memory_get` /
+  `memory_link` / `memory_neighbors` / `memory_reflect` /
+  `memory_save_search_result` / `mnemush_status` / `memory_next` /
+  `memory_frontier` / `memory_action_create` / `memory_action_update` /
+  `identity_propose` / `identity_list_pending` / `identity_approve` /
+  `identity_reject`), 复用 `mnemush-client` spawn `mnemush-mcp`。
+- **概念表注入**: `ctx.systemPrompt.section`(order 90)注入
+  `[memory index] N concepts`, 启动 + `session/created` + memory 写入后刷新;
+  刷新链串行化避免并发 dispose/register 撞重复 section 名。
+- **session 维护**: `session/disposed` 时跑 prune / edge-decay /
+  process-needs-review / eval-prune(沿用 Pi 插件的 `MNEMUSH_*_ON_SESSION_END`
+  开关; 硬删 `--isolate` 永不自动执行)。
+- 插件 duck-type DSH 服务接口(同 mnemush-pi duck-type Pi SDK), 无
+  `@deepseek-ai/*` 构建期硬依赖; 安装:`dsh plugin --profile <name> add mnemush-dsh`
+  后在 profile 的 `cordis.patch.yml` 加 `- id: mnemush` / `name: mnemush-dsh`。
+
 ## v1.4.0 (2026-08-07)
 
 ### Added

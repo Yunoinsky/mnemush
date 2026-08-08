@@ -27,13 +27,14 @@ pub fn current_confidence(m: &Memory, cfg: &Config, now: DateTime<Utc>) -> f32 {
     if cfg.forgetting.disable_forgetting {
         return m.confidence;
     }
-
     let days = (now - m.last_accessed_at).num_days().max(0) as f32;
-    let hl = effective_half_life(m, cfg);
-    let time_decay = 0.5_f32.powf(days / hl);
-    let access_boost =
-        1.0 + (m.access_count as f32 + 1.0).ln().max(0.0) * cfg.forgetting.access_boost_factor;
-    (m.initial_confidence * time_decay * access_boost).clamp(0.0, 1.0)
+    decayed(
+        m.initial_confidence,
+        days,
+        effective_half_life(m, cfg),
+        m.access_count,
+        cfg.forgetting.access_boost_factor,
+    )
 }
 
 /// Effective half-life for a memory, factoring in its importance override.
@@ -46,37 +47,32 @@ pub fn effective_half_life(m: &Memory, cfg: &Config) -> f32 {
     (cfg.forgetting.half_life_days * factor).max(0.5)
 }
 
-/// Boost a memory's stability and confidence on access.
-pub fn on_access(m: &mut Memory, cfg: &Config, now: DateTime<Utc>) {
-    m.access_count = m.access_count.saturating_add(1);
-    m.last_accessed_at = now;
-    m.confidence = current_confidence(m, cfg, now);
+/// Shared Ebbinghaus decay + access boost used by both memory
+/// confidence and edge strength:
+/// `initial * 0.5^(days/hl) * (1 + ln(access+1) * boost)`, clamped to [0,1].
+fn decayed(initial: f32, days: f32, hl: f32, access_count: u32, boost_factor: f32) -> f32 {
+    let time_decay = 0.5_f32.powf(days / hl);
+    let access_boost = 1.0 + (access_count as f32 + 1.0).ln().max(0.0) * boost_factor;
+    (initial * time_decay * access_boost).clamp(0.0, 1.0)
 }
 
 /// Compute current strength for an edge at `now`.
 ///
-/// Same shape as `current_confidence` but for graph edges:
-///   strength = initial_strength * 0.5^(days / stability)
-///                       * (1 + ln(access+1) * access_boost_factor)
-/// clamped to [0, 1]. Honors `disable_forgetting` (frozen).
+/// Same shape as `current_confidence` but for graph edges. Honors
+/// `disable_forgetting` (frozen).
 pub fn current_edge_strength(e: &Edge, cfg: &Config, now: DateTime<Utc>) -> f32 {
     if cfg.forgetting.disable_forgetting {
         return e.strength;
     }
     let last = e.last_activated.unwrap_or(e.created_at);
     let days = (now - last).num_days().max(0) as f32;
-    let hl = e.stability.max(0.5);
-    let time_decay = 0.5_f32.powf(days / hl);
-    let access_boost =
-        1.0 + (e.access_count as f32 + 1.0).ln().max(0.0) * cfg.forgetting.access_boost_factor;
-    (e.initial_strength * time_decay * access_boost).clamp(0.0, 1.0)
-}
-
-/// Boost an edge's strength on activation (neighbor expansion hit).
-pub fn on_edge_access(e: &mut Edge, cfg: &Config, now: DateTime<Utc>) {
-    e.access_count = e.access_count.saturating_add(1);
-    e.last_activated = Some(now);
-    e.strength = current_edge_strength(e, cfg, now);
+    decayed(
+        e.initial_strength,
+        days,
+        e.stability.max(0.5),
+        e.access_count,
+        cfg.forgetting.access_boost_factor,
+    )
 }
 
 /// Process the needs_review queue: for every active memory with
@@ -179,7 +175,6 @@ pub fn decay_all_edges(store: &mut Store, cfg: &Config, now: DateTime<Utc>) -> R
 
     let tx = store.conn.unchecked_transaction()?;
     let mut updated = 0usize;
-    let now_ts = now.timestamp();
     for (
         id,
         _strength,
@@ -190,24 +185,12 @@ pub fn decay_all_edges(store: &mut Store, cfg: &Config, now: DateTime<Utc>) -> R
         created_at_ts,
     ) in rows
     {
-        let edge_for_calc = Edge {
-            id: id.clone(),
-            source_id: String::new(),
-            target_id: String::new(),
-            edge_type: crate::schema::EdgeType::Related, // unused by formula
-            strength: 0.0,
-            initial_strength,
-            bidirectional: false,
-            provenance: None,
-            evidence: None,
-            context: None,
-            access_count,
-            last_activated: last_activated_ts.and_then(|t| DateTime::<Utc>::from_timestamp(t, 0)),
-            stability,
-            created_at: DateTime::<Utc>::from_timestamp(created_at_ts, 0).unwrap_or(now),
-            deleted_at: None,
-        };
-        let new_strength = current_edge_strength(&edge_for_calc, cfg, now);
+        let last = last_activated_ts
+            .and_then(|t| DateTime::<Utc>::from_timestamp(t, 0))
+            .unwrap_or_else(|| DateTime::<Utc>::from_timestamp(created_at_ts, 0).unwrap_or(now));
+        let days = (now - last).num_days().max(0) as f32;
+        let new_strength =
+            decayed(initial_strength, days, stability.max(0.5), access_count, cfg.forgetting.access_boost_factor);
         tx.execute(
             "UPDATE memory_edge SET strength = ?1 WHERE id = ?2",
             rusqlite::params![new_strength, id],
@@ -215,7 +198,6 @@ pub fn decay_all_edges(store: &mut Store, cfg: &Config, now: DateTime<Utc>) -> R
         updated += 1;
     }
     tx.commit()?;
-    let _ = now_ts; // silence unused if compiler ever warns
     Ok(updated)
 }
 
@@ -487,16 +469,11 @@ pub fn isolate_hard_delete(
             serde_json::to_string(&reason).unwrap_or_else(|_| r#"{"kind":"unknown"}"#.to_string());
 
         let tx = store.conn.unchecked_transaction()?;
-        // ponytail: FTS5 rowid alignment was fixed in v0.2 (FTS5 now
-        // auto-assigns its own rowid, see store.rs:237). The remaining
-        // concern: hard-deleting the memory row leaves the matching
-        // FTS5 row orphaned, matching current soft_delete behavior.
-        // A future `mnemush vacuum` could rebuild memory_fts if orphans
-        // become a problem.
         // Keep the FTS5 index rowid-aligned: capture the rowid BEFORE
         // deleting the memory row, then remove the orphaned FTS row.
         // Without this, rowid reuse made search return wrong content.
-        // (2026-08-06 fix.)
+        // (2026-08-06 fix. `mnemush reindex` rebuilds memory_fts
+        // wholesale if orphans ever accumulate.)
         let fts_rowid: Option<i64> = tx
             .query_row("SELECT rowid FROM memory WHERE id = ?1", rusqlite::params![id], |r| r.get(0))
             .optional()?;
@@ -1026,26 +1003,6 @@ mod tests {
         let s = current_edge_strength(&e, &c, now);
         // disable_forgetting should return current strength unchanged
         assert!((s - 0.7).abs() < 0.01, "expected 0.7, got {s}");
-    }
-
-    #[test]
-    fn on_edge_access_refreshes_strength() {
-        let c = cfg();
-        let now = Utc::now();
-        let mut e = edge(120, 0.5, 0);
-        // Pretend it just got accessed via neighbors (last_activated updated)
-        on_edge_access(&mut e, &c, now);
-        assert_eq!(e.access_count, 1);
-        assert!((e.last_activated.unwrap() - now).num_seconds().abs() < 2);
-        // After access, strength should be > old decayed strength
-        let fresh = current_edge_strength(&e, &c, now);
-        let decayed = {
-            let mut old = e.clone();
-            old.last_activated = Some(now - Duration::days(120));
-            old.access_count = 0;
-            current_edge_strength(&old, &c, now)
-        };
-        assert!(fresh > decayed);
     }
 
     fn insert_test_edge(store: &mut Store, id: &str, days_old: i64, initial: f32) {

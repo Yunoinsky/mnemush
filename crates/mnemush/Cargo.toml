@@ -1,7 +1,8 @@
 [package]
 name = "mnemush"
-version = "1.0.0"
+version = "1.5.0"
 edition = "2021"
+authors = ["Yunoinsky Chen"]
 rust-version = "1.75"
 description = "Brain-inspired memory layer for AI coding agents"
 license = "MulanPSL-2.0"

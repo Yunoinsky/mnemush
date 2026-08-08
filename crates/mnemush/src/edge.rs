@@ -111,7 +111,7 @@ impl<'a> EdgeApi<'a> {
             )?;
         }
         self.store
-            .log_event("edge_link", None, Some(&edge.id), None, "agent")?;
+            .log_event_tx(tx, "edge_link", None, Some(&edge.id), None, "agent")?;
         Ok(edge)
     }
 

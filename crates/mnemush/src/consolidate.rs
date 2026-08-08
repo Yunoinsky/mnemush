@@ -358,7 +358,7 @@ fn run_one(api: &MemoryApi, action: &Action, stats: &mut ExecStats) -> Result<()
                             "[forgotten] {} — {} 被判定遗忘。原内容摘要: {}。原因: {}",
                             m.title,
                             chrono::Utc::now().format("%Y-%m-%d %H:%M"),
-                            trunc(&m.content, 150),
+                            crate::truncate(&m.content, 150),
                             reason,
                         ),
                         format!("[forgotten] {}", m.title),
@@ -581,7 +581,9 @@ pub fn collect_dream_candidates(api: &MemoryApi, m: usize) -> Result<Vec<crate::
         return Ok(vec![]);
     }
     let seed_ts = crate::store::Store::now_ts();
-    let mut rng = SplitMix64::new((seed_ts as u64) ^ (m as u64 * 0x9E3779B97F4A7C15));
+    // wrapping_mul: 黄金比例常数超过 u64::MAX/2, 任何 m>=2 的直接乘法都会
+    // 在 debug 下溢出 panic(默认 dream_sample_m=3 必触发)。
+    let mut rng = SplitMix64::new((seed_ts as u64) ^ (m as u64).wrapping_mul(0x9E3779B97F4A7C15));
     // 种子: 5 最新(list 已按 created_at DESC)
     let mut cands: Vec<crate::schema::Memory> = all.iter().take(5).cloned().collect();
     // 5 随机(从剩余中抽)
@@ -626,14 +628,6 @@ pub fn collect_dream_candidates(api: &MemoryApi, m: usize) -> Result<Vec<crate::
     Ok(cands)
 }
 
-fn trunc(s: &str, n: usize) -> String {
-    let mut out = s.chars().take(n).collect::<String>();
-    if s.chars().count() > n {
-        out.push('…');
-    }
-    out
-}
-
 /// 组装 prompt: 系统提示(巩固+遗忘指令/双阈值/保护规则/schema)+ 候选。
 pub fn build_prompt(cands: &[Memory], is_dream: bool) -> Vec<crate::llm::ChatMsg> {
     let mut items = String::new();
@@ -647,7 +641,7 @@ pub fn build_prompt(cands: &[Memory], is_dream: bool) -> Vec<crate::llm::ChatMsg
             m.confidence,
             m.created_at.date_naive(),
             m.title,
-            trunc(&m.content, 150),
+            crate::truncate(&m.content, 150),
         ));
     }
     let sys = format!(
@@ -1169,17 +1163,6 @@ mod tests {
         std::env::remove_var("MNEMUSH_DATA_DIR");
         let _ = std::fs::remove_dir_all(&dir);
         r
-    }
-
-    #[test]
-    fn dream_includes_neuropilize_candidates_in_prompt() {
-        let (store, cfg) = test_store();
-        let api = MemoryApi::new(&store, &cfg);
-        api.add(NewMemory::note("concept body for np", "概念甲")).unwrap();
-        let cands = crate::capacity::neuropilize_candidates(&api, 10).unwrap();
-        assert!(!cands.is_empty(), "note candidate surfaced");
-        let prompt = build_prompt(&cands, true);
-        assert!(prompt.iter().any(|m| m.content.contains("概念甲")), "candidate in prompt");
     }
 
     /// plan-gap 修复: neuropilize 动作落盘 —— degrade 前的原 content 写

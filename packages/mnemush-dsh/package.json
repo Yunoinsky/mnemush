@@ -1,0 +1,57 @@
+{
+  "name": "mnemush-dsh",
+  "version": "1.5.0",
+  "description": "Mnemush memory plugin for DeepSeek Harness (DSH).",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "mnemush-client": "*"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-system-prompt": "^0.1.0-rc.6",
+    "@deepseek-ai/cordis": "^4.0.1"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-tools": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-system-prompt": {
+      "optional": true
+    },
+    "@deepseek-ai/cordis": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MulanPSL-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Yunoinsky/mnemush.git"
+  },
+  "author": "Yunoinsky Chen",
+  "keywords": [
+    "memory",
+    "agent",
+    "dsh",
+    "mcp"
+  ]
+}

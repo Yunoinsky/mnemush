@@ -25,7 +25,17 @@ import {
   isMnemushTool,
   looksLikeCorrection,
   looksLikeRemember,
+  buildConceptInject,
+  parseConceptsJson,
+  loadConceptInject,
+  runSessionEndMaintenance,
+  maybeRunDream,
+  appendEvalLog,
 } from "mnemush-client";
+
+// 概念表 helper 已上移至 mnemush-client(与 mnemush-dsh 共享)。这里再
+// 导出一次以保持 mnemush-pi 的公开 API 兼容。
+export { buildConceptInject, parseConceptsJson };
 
 interface ToolDefinition {
   name: string;
@@ -98,119 +108,10 @@ function summarizeArgs(args: Record<string, unknown>): Record<string, unknown> {
   return out;
 }
 
-// Serialize writes against a single per-session queue so concurrent
-// after_tool_call hooks don't race on the same NDJSON file. Each
-// write must complete before the next starts — otherwise we'd
-// interleave entries and lose some.
-const evalWriters: Map<string, Promise<void>> = new Map();
-
-async function writeEvalLog(entry: {
-  ts: number;
-  session: string;
-  agent: string;
-  tool: string;
-  args_summary: Record<string, unknown>;
-  result_count: number;
-  latency_ms: number;
-  error: string | null;
-}): Promise<void> {
-  // Chain onto this session's previous write (if any) so we
-  // serialize. Then store the new tail of the chain.
-  const prev = evalWriters.get(entry.session) ?? Promise.resolve();
-  const next = prev.then(async () => {
-    try {
-      // Lazy import to avoid loading fs unless needed
-      const fs = await import("node:fs/promises");
-      const path = await import("node:path");
-      const os = await import("node:os");
-      const dataDir = process.env.MNEMUSH_DATA_DIR ?? path.join(os.homedir(), ".mnemush");
-      const evalDir = path.join(dataDir, "eval");
-      await fs.mkdir(evalDir, { recursive: true });
-      const logFile = path.join(evalDir, `${entry.session}.ndjson`);
-      await fs.appendFile(logFile, JSON.stringify(entry) + "\n", "utf8");
-    } catch (e) {
-      // Eval log is best-effort — never break the main flow
-      console.error(`[mnemush] eval log write failed: ${e}`);
-    }
-  });
-  // Update the tail (clean up after completion so memory doesn't grow)
-  evalWriters.set(entry.session, next.finally(() => {
-    if (evalWriters.get(entry.session) === next) {
-      evalWriters.delete(entry.session);
-    }
-  }));
-  return next;
-}
-
 /**
  * 概念表(context priming index)注入文本构建 + CLI 加载。
- * 与 Task 1 的 `mnemush concepts --format json` 输出字段一致。
+ * 实现已上移至 mnemush-client(shared by pi / dsh)。
  */
-
-export interface ConceptEntry {
-  title: string;
-  category: string;
-  importance: number;
-  score: number;
-}
-
-/** 概念表注入文本: 唤起索引(详情走 memory 工具)。空 → 空串(不注入)。 */
-export function buildConceptInject(concepts: ConceptEntry[]): string {
-  if (concepts.length === 0) return "";
-  const lines = concepts.map((c) => `· ${c.title} (${c.category})`).join("\n");
-  return `[memory index] ${concepts.length} concepts (detail via memory tool):\n${lines}`;
-}
-
-/**
- * 解析 `mnemush concepts --format json` 输出: 兼容 spec 的
- * `{"concepts": [...], "count": N}`(主用)与旧版裸数组。无效输入 → []。
- */
-export function parseConceptsJson(raw: string): ConceptEntry[] {
-  let data: unknown;
-  try {
-    data = JSON.parse(raw);
-  } catch {
-    return [];
-  }
-  const arr = Array.isArray(data) ? data : (data as { concepts?: unknown[] } | null)?.concepts ?? [];
-  return arr.filter(
-    (e): e is ConceptEntry =>
-      !!e && typeof e.title === "string" && typeof e.category === "string",
-  );
-}
-
-/**
- * 调 `mnemush concepts --limit N --format json`, 解析 → 注入文本。
- * 失败/空 → null(静默, 不阻塞会话)。
- */
-export async function loadConceptInject(limit = 40): Promise<string | null> {
-  const { spawn } = await import("node:child_process");
-  return new Promise((resolve) => {
-    let out = "";
-    let settled = false;
-    const finish = (v: string | null) => {
-      if (!settled) {
-        settled = true;
-        resolve(v);
-      }
-    };
-    const proc = spawn("mnemush", ["concepts", "--limit", String(limit), "--format", "json"], {
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    proc.stdout.on("data", (c: Buffer) => (out += c.toString()));
-    proc.stderr.on("data", () => { /* swallow */ });
-    const timer = setTimeout(() => proc.kill("SIGTERM"), 3000);
-    proc.on("error", () => {
-      clearTimeout(timer);
-      finish(null);
-    });
-    proc.on("exit", () => {
-      clearTimeout(timer);
-      finish(buildConceptInject(parseConceptsJson(out.trim())));
-    });
-  });
-}
-
 
 export default function activate(pi: ExtensionAPI): void {
   // ── session_start: connect to mnemush-mcp ─────────────────────
@@ -233,6 +134,8 @@ export default function activate(pi: ExtensionAPI): void {
       void surfaceReflectCandidateCount();
       // 概念表注入: 唤起索引写入 agent 上下文(连接成功后 fire-and-forget)。
       void injectConceptIndex();
+      // 会话驱动 dream 调度(方案 B): 距上次 > 24h 则后台巩固。
+      void maybeRunDream({ onOutput: (line) => line && pi.sendStatus?.(`🌙 dream: ${line}`, 8000) });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       console.error(`[mnemush] failed to connect: ${msg}`);
@@ -339,28 +242,36 @@ export default function activate(pi: ExtensionAPI): void {
   pi.on("session_end", async () => {
     if (client) {
       try {
-        await runPruneOnSessionEnd();
+        // 共享维护四件套(prune/edge-decay/needs-review/eval-prune)。
+        // 门控与输出解析都在这里; 失败静默, 永不阻塞 session_end。
+        const results = await runSessionEndMaintenance();
+        const pruned = results.get("prune") ?? "";
+        const pm = pruned.match(/soft-deleted (\d+) memory/);
+        if (pm && pm[1]) {
+          pi.sendStatus?.(`🧹 mnemush pruned ${pm[1]} memory(ies) (recoverable: \`mnemush prune --help\`)`, 5000);
+        }
+        const ed = results.get("edge-decay") ?? "";
+        const em = ed.match(/edges decayed: (\d+)/);
+        if (em && em[1] && parseInt(em[1], 10) > 0) {
+          pi.sendStatus?.(`📈 mnemush edge-decay updated ${em[1]} edge(s)`, 5000);
+        }
+        const nr = results.get("needs-review") ?? "";
+        const nm = nr.match(/needs_review processed: (\d+)/);
+        if (nm && nm[1] && parseInt(nm[1], 10) > 0) {
+          pi.sendStatus?.(`✅ mnemush needs-review processed ${nm[1]} item(s)`, 5000);
+        }
+        const ep = results.get("eval-prune") ?? "";
+        const evm = ep.match(/removed by age=(\d+), by count=(\d+), lines dropped=(\d+)/);
+        if (evm && evm[1] && evm[2] && evm[3]) {
+          const age = parseInt(evm[1], 10);
+          const count = parseInt(evm[2], 10);
+          const dropped = parseInt(evm[3], 10);
+          if (age > 0 || count > 0 || dropped > 0) {
+            pi.sendStatus?.(`🧹 mnemush eval log: ${age} aged, ${count} overflow, ${dropped} lines dropped`, 5000);
+          }
+        }
       } catch (e) {
-        // prune failures must never block session end
-        console.error(`[mnemush] prune on session_end failed: ${e}`);
-      }
-      try {
-        await runEdgeDecayOnSessionEnd();
-      } catch (e) {
-        // edge decay failures must never block session end
-        console.error(`[mnemush] edge-decay on session_end failed: ${e}`);
-      }
-      try {
-        await runNeedsReviewOnSessionEnd();
-      } catch (e) {
-        // needs_review failures must never block session end
-        console.error(`[mnemush] needs-review on session_end failed: ${e}`);
-      }
-      try {
-        await runEvalPruneOnSessionEnd();
-      } catch (e) {
-        // eval prune failures must never block session end
-        console.error(`[mnemush] eval-prune on session_end failed: ${e}`);
+        console.error(`[mnemush] session-end maintenance failed: ${e}`);
       }
       try {
         await client.disconnect();
@@ -370,178 +281,6 @@ export default function activate(pi: ExtensionAPI): void {
       client = null;
     }
   });
-
-  /**
-   * Spawn the mnemush CLI in prune mode. Shells out rather than going
-   * through the MCP session because the session is about to close and
-   * we want a separate timeout/failure boundary. Output is captured
-   * and surfaced via `sendStatus` so the user sees what happened.
-   *
-   * Default mode is APPLY (auto-soft-delete up to 5 low-confidence
-   * memories per session). Soft-delete is reversible
-   * (`UPDATE memory SET deleted_at=NULL`), so this is safe. Hard-delete
-   * (`--isolate`) is NEVER auto-invoked.
-   *
-   * Env vars:
-   *   MNEMUSH_PRUNE_ON_SESSION_END=off    → skip entirely
-   *   MNEMUSH_PRUNE_ON_SESSION_END=dry    → just list candidates, no write
-   *   MNEMUSH_PRUNE_ON_SESSION_END=apply  → soft-delete (default)
-   *   MNEMUSH_PRUNE_SESSION_LIMIT=N       → cap (default 5)
-   *
-   * ponytail: cap at 5 per session to keep session_end snappy.
-   */
-  async function runPruneOnSessionEnd(): Promise<void> {
-    const { spawn } = await import("node:child_process");
-    const limit = process.env.MNEMUSH_PRUNE_SESSION_LIMIT ?? "5";
-    const mode = process.env.MNEMUSH_PRUNE_ON_SESSION_END ?? "apply";
-    if (mode === "off" || mode === "0") return;
-    const apply = mode === "apply" || mode === "1" || mode === "true";
-
-    return new Promise<void>((resolve) => {
-      const args = ["prune", "--limit", limit];
-      if (apply) args.push("--apply");
-      const proc = spawn("mnemush", args, { stdio: ["ignore", "pipe", "pipe"] });
-      let out = "";
-      proc.stdout.on("data", (c: Buffer) => (out += c.toString()));
-      proc.stderr.on("data", (c: Buffer) => (out += c.toString()));
-      const timer = setTimeout(() => proc.kill("SIGTERM"), 3000);
-      proc.on("exit", () => {
-        clearTimeout(timer);
-        // Parse: "soft-deleted N memory(ies):" → N; "(no candidates)" → 0
-        const applied = out.match(/soft-deleted (\d+) memory/);
-        const noCandidates = out.includes("no prune candidates") || out.includes("(no candidates)");
-        const status = applied
-          ? `🧹 mnemush pruned ${applied[1]} memory(ies) (recoverable: \`mnemush prune --help\`)`
-          : noCandidates
-            ? null
-            : `🧹 mnemush prune completed`;
-        if (status) pi.sendStatus?.(status, 5000);
-        resolve();
-      });
-      proc.on("error", () => {
-        clearTimeout(timer);
-        resolve(); // never block session_end
-      });
-    });
-  }
-
-  /**
-   * Apply Ebbinghaus decay to all active edges (same formula as
-   * memory confidence). Defaults ON; set MNEMUSH_EDGE_DECAY_ON_SESSION_END=off
-   * to skip. Output: "edges decayed: N". Failures never block session_end.
-   *
-   * ponytail: no limit param — graph decay is global, idempotent, cheap
-   * (one transaction, one UPDATE per edge). Hard cap of edges_total is
-   * bounded by your own memory count, not time.
-   */
-  async function runEdgeDecayOnSessionEnd(): Promise<void> {
-    if ((process.env.MNEMUSH_EDGE_DECAY_ON_SESSION_END ?? "on") === "off") return;
-    const { spawn } = await import("node:child_process");
-    return new Promise<void>((resolve) => {
-      const proc = spawn("mnemush", ["edge-decay"], {
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-      let out = "";
-      proc.stdout.on("data", (c: Buffer) => (out += c.toString()));
-      proc.stderr.on("data", (c: Buffer) => (out += c.toString()));
-      const timer = setTimeout(() => proc.kill("SIGTERM"), 3000);
-      proc.on("exit", () => {
-        clearTimeout(timer);
-        const m = out.match(/edges decayed: (\d+)/);
-        if (m && m[1] && parseInt(m[1], 10) > 0) {
-          pi.sendStatus?.(`📈 mnemush edge-decay updated ${m[1]} edge(s)`, 5000);
-        }
-        resolve();
-      });
-      proc.on("error", () => {
-        clearTimeout(timer);
-        resolve();
-      });
-    });
-  }
-
-  /**
-   * Process the needs_review queue: clear flags older than grace,
-   * downgrade repeated failures. Defaults ON (grace=1 day).
-   * MNEMUSH_NEEDS_REVIEW_ON_SESSION_END=off to skip.
-   */
-  async function runNeedsReviewOnSessionEnd(): Promise<void> {
-    if ((process.env.MNEMUSH_NEEDS_REVIEW_ON_SESSION_END ?? "on") === "off") return;
-    const { spawn } = await import("node:child_process");
-    const grace = process.env.MNEMUSH_NEEDS_REVIEW_GRACE_DAYS ?? "1";
-    return new Promise<void>((resolve) => {
-      const proc = spawn("mnemush", ["process-needs-review", "--grace-days", grace], {
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-      let out = "";
-      proc.stdout.on("data", (c: Buffer) => (out += c.toString()));
-      proc.stderr.on("data", (c: Buffer) => (out += c.toString()));
-      const timer = setTimeout(() => proc.kill("SIGTERM"), 3000);
-      proc.on("exit", () => {
-        clearTimeout(timer);
-        const m = out.match(/needs_review processed: (\d+)/);
-        if (m && m[1] && parseInt(m[1], 10) > 0) {
-          pi.sendStatus?.(`✅ mnemush needs-review processed ${m[1]} item(s)`, 5000);
-        }
-        resolve();
-      });
-      proc.on("error", () => {
-        clearTimeout(timer);
-        resolve();
-      });
-    });
-  }
-
-  /**
-   * Apply eval-log maintenance caps at session_end. Three caps from
-   * `[eval]` in config.toml (default: 30d TTL, 5000 lines/file,
-   * 30 session files). Shells out to `mnemush eval prune --apply` —
-   * separate process from the MCP session so a slow file-rewrite
-   * can't block shutdown.
-   *
-   * Disabled by setting MNEMUSH_EVAL_PRUNE_ON_SESSION_END=off. Default
-   * is ON because the cost is bounded (one directory scan + a few
-   * file ops) and the alternative is unbounded disk growth.
-   */
-  async function runEvalPruneOnSessionEnd(): Promise<void> {
-    if ((process.env.MNEMUSH_EVAL_PRUNE_ON_SESSION_END ?? "on") === "off") return;
-    const { spawn } = await import("node:child_process");
-    return new Promise<void>((resolve) => {
-      const proc = spawn("mnemush", ["eval", "prune", "--apply"], {
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-      let out = "";
-      proc.stdout.on("data", (c: Buffer) => (out += c.toString()));
-      proc.stderr.on("data", (c: Buffer) => (out += c.toString()));
-      // 5s is generous — the dir is bounded (30 files) and the
-      // bottleneck is file rewrites, which are local and fast.
-      const timer = setTimeout(() => proc.kill("SIGTERM"), 5000);
-      proc.on("exit", () => {
-        clearTimeout(timer);
-        // Only surface status when something actually changed.
-        // "pruned: 0 file(s) kept, 0 lines kept; removed by age=0, ..." → quiet.
-        const m = out.match(/removed by age=(\d+), by count=(\d+), lines dropped=(\d+)/);
-        if (m && m[1] && m[2] && m[3]) {
-          const age = parseInt(m[1], 10);
-          const count = parseInt(m[2], 10);
-          const dropped = parseInt(m[3], 10);
-          if (age > 0 || count > 0 || dropped > 0) {
-            pi.sendStatus?.(
-              `🧹 mnemush eval log: ${age} aged, ${count} overflow, ${dropped} lines dropped`,
-              5000,
-            );
-          }
-        }
-        resolve();
-      });
-      proc.on("error", () => {
-        // mnemush not on PATH (e.g. test runs): silent skip, never block.
-        clearTimeout(timer);
-        resolve();
-      });
-    });
-  }
-
   // ── before_agent_start: heuristic capture ──────────────────────
   // Pi's actual event for "user just submitted a prompt" is
   // `before_agent_start` (fires after submit, before agent loop).
@@ -672,7 +411,7 @@ export default function activate(pi: ExtensionAPI): void {
         }
       } catch { /* not JSON array — keep 0 */ }
     }
-    writeEvalLog({
+    appendEvalLog({
       ts: Math.floor(t0 / 1000),
       session: evalSessionId,
       agent: "pi",

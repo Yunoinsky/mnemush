@@ -1,6 +1,6 @@
 # Mnemush 🧠
 
-> Persistent, brain-inspired memory for AI coding agents. Rust core, TS adapters for Pi and OpenCode.
+> Persistent, brain-inspired memory for AI coding agents. Rust core, TS adapters for Pi, OpenCode, and DeepSeek Harness (DSH).
 
 **Mnemush** is a portmanteau of **mneme** (Greek μνήμη, "memory") and **mushroom** — a nod to the insect **mushroom body** (蕈体 / 蘑菇体), the brain structure responsible for learning and memory in insects (flies, bees, ants). Just as the mushroom body stores sparse, distributed, associative memories that let an insect generalize across contexts, Mnemush keeps your agent's memories as a linked graph that auto-consolidates — distributed associative storage, with the "fruiting body" being the retrievable memory that emerges from the network when it matters.
 
@@ -9,50 +9,54 @@
 Two layers, mirroring insect neurobiology:
 
 ```
- neuropils(内容层, 文件树)                    mushroom_body(索引层, 主库)
-┌─────────────────────────────┐            ┌──────────────────────────────┐
-│ 任意 markdown 文件树 = 记忆   │            │ agent 经验: 全文 + 向量 + 图    │
-│ 内容权威源(grep/cat/Git 可读) │  import   │ 摘要入口: neuropil 化的记忆留   │
-│                             │◄──────────►│  title+摘要+路径(内容在文件树)  │
-└─────────────────────────────┘  按需加载   └──────────────────────────────┘
+┌──────────────────────────────┐      ┌──────────────────────────────┐
+│ NEUROPILS (content layer)    │      │ MUSHROOM_BODY (index layer)  │
+├──────────────────────────────┤      ├──────────────────────────────┤
+│ any markdown file tree       │      │ agent experience: full text  │
+│ = memory; authoritative      │      │ + vectors + graph;           │
+│ source (grep / Git)          │      │ summary entries (title+path) │
+└──────────────────────────────┘      └──────────────────────────────┘
+      import-tree ◄──────────────────────────► export + summary
 ```
 
-- **neuropils**(神经毯) — 文件树内容层。任何目录树都是记忆(概念、论文、知识库),文件即权威源,可用 grep/cat/tree 直接读、Git 版本化。`mnemush import-tree <dir> --project <name>` 增量同步进索引。
-- **mushroom_body**(蘑菇体) — 主库(SQLite + FTS5 + 向量)。存 agent 经验的全文/向量/图、神经pil 化的摘要入口、以及跨簇关联边。检索、巩固、遗忘都在这一层。
+- **neuropils** — file-tree content layer. Any directory tree is memory (concepts, papers, knowledge bases); files are the authoritative source, directly readable via grep/cat/tree and Git-versionable. `mnemush import-tree <dir> --project <name>` syncs it into the index incrementally.
+- **mushroom_body** — the DB (SQLite + FTS5 + vectors). Holds agent experience (full text/vectors/graph), summary entries for neuropilized memories, and cross-cluster edges. Retrieval, consolidation, and forgetting happen here.
 
 ```
-        ┌────────────┐   ┌────────────┐
-        │    Pi      │   │  OpenCode  │   (TS agents)
-        └─────┬──────┘   └─────┬──────┘
-              │ mnemush-pi/opencode (hooks + tools)
-              └────────┬───────┘
-                       │ MCP stdio
-                       ▼
-              ┌─────────────┐
-              │ mnemush (Rust) │  ← single binary, MCP server + CLI
-              └──────┬──────┘
-                     ▼
+        ┌────────┐  ┌──────────┐  ┌─────────┐
+        │   Pi   │  │ OpenCode │  │   DSH   │   (TS agents)
+        └───┬────┘  └────┬─────┘  └────┬────┘
+            │ mnemush-pi / mnemush-opencode / mnemush-dsh (hooks + tools)
+            └─────────────┬────────────┘
+                          │ MCP stdio
+                          ▼
+                 ┌────────────────┐
+                 │ mnemush (Rust) │   ← single binary: MCP server + CLI
+                 └────────┬───────┘
+                          ▼
         ~/.mnemush/mnemush.db   (mushroom_body)
-        ~/.mnemush/neuropils/   (默认 neuropil 目录)
+        ~/.mnemush/neuropils/   (default neuropil dir)
 ```
 
-**大脑映射**:neuropils = 皮层(内容就地存储),mushroom_body = 海马/蘑菇体(索引 + 关联);consolidate = 记忆巩固,dream = 睡眠期巩固+遗忘高峰,概念表 = 前额叶检索线索,forget_trace = 遗忘痕迹(忘掉什么本身也是信息)。
+**Brain mapping**: neuropils = cortex (content stored in place); mushroom_body = hippocampus/mushroom body (index + associations); consolidate = memory consolidation; dream = sleep consolidation + forgetting peak; concept table = prefrontal retrieval cues; forget_trace = forgetting trace (forgetting itself is information).
 
 ## Status
 
-**v1.4.0 (2026-08-07)** — 概念表(context priming index): `mnemush concepts` 按 importance×recency×access 输出 top-N 唤起索引;Pi 插件 session_start 注入 + 写入时刷新。让 agent 知道记忆里有什么可搜(模拟前额叶检索线索)。
+**v1.5.0 (2026-08-14)** — DeepSeek Harness 插件: `mnemush-dsh` 原生 Cordis 插件, 16 个 memory 工具 + 概念表注入 + session 维护(与 Pi 插件同契约)。
 
-**v1.3.0 (2026-08-07)** — 容量管理: 物理 100MB 硬阈值 + 驱逐链 + neuropil 化 + 冷归档,并入 nightly dream。
+**v1.4.0 (2026-08-07)** — concept table (context priming index): `mnemush concepts` ranks top-N by importance×recency×access; Pi extension injects at session_start and refreshes on writes. Tells the agent what's retrievable (prefrontal retrieval cues).
 
-**v1.2.0 (2026-08-07)** — LLM 驱动巩固 + 主动遗忘: `mnemush consolidate` / `mnemush dream`(遗忘 + 遗忘痕迹)。
+**v1.3.0 (2026-08-07)** — capacity management: 100MB physical cap + eviction chain + neuropilization + cold archive, folded into the nightly dream pass.
 
-**v1.1.0 (2026-08-07)** — neuropils 文件树记忆: `mnemush import-tree` / `export-tree`,任意目录树即记忆。
+**v1.2.0 (2026-08-07)** — LLM-driven consolidation + active forgetting: `mnemush consolidate` / `mnemush dream` (forgetting + forget traces).
 
-**v1.0.0 (2026-08-06)** — 稳定版: API 稳定性、跨平台 CI、语义召回、自动合并、Git 同步。
+**v1.1.0 (2026-08-07)** — neuropils file-tree memory: `mnemush import-tree` / `export-tree`; any directory tree is memory.
 
-**v0.4 (2026-08-05)** — backup/restore、多项目隔离、schema 迁移。**v0.3** — 图分析 + 自评估。**v0.1-0.2** — 核心存储 + MCP + 自适应维护。
+**v1.0.0 (2026-08-06)** — stable: API stability, cross-platform CI, semantic recall, auto-merge, Git sync.
 
-详见 [CHANGELOG.md](CHANGELOG.md) 与 [ROADMAP.md](ROADMAP.md)。
+**v0.4 (2026-08-05)** — backup/restore, multi-project isolation, schema migrations. **v0.3** — graph analytics + self-eval. **v0.1-0.2** — core storage + MCP + auto-maintenance.
+
+See [CHANGELOG.md](CHANGELOG.md) and [ROADMAP.md](ROADMAP.md).
 
 ## Quick start
 
@@ -71,72 +75,89 @@ $EDITOR ~/.mnemush/identity/USER.md
 mnemush add "use jose not jsonwebtoken" --category decision --importance 0.9
 mnemush search "jose"
 mnemush list
-mnemush status                    # 含容量段: DB 大小/上限 + neuropil 入口数
+mnemush status                    # incl. capacity line: DB size/cap + neuropil entry count
 
-# v1.1: neuropils — 任何目录树都是记忆
-mnemush import-tree ~/my-knowledge --project wiki   # 索引文件树(前端matter + wikilink)
-mnemush export-tree ~/out --project wiki            # 导出回文件树
+# v1.1: neuropils — any directory tree is memory
+mnemush import-tree ~/my-knowledge --project wiki   # index a file tree (frontmatter + wikilink)
+mnemush export-tree ~/out --project wiki            # export back to a file tree
 
-# v1.2: LLM 驱动巩固 + 主动遗忘
-mnemush consolidate --dry-run     # 预览 LLM 会做什么
-mnemush consolidate               # 增量巩固: update/link/merge/insight/decay/forget
-mnemush dream                     # nightly 全库: 巩固 + neuropil 化 + 冷压缩 + 容量报告
+# v1.2: LLM-driven consolidation + active forgetting
+mnemush consolidate --dry-run     # preview what the LLM would do
+mnemush consolidate               # incremental: update/link/merge/insight/decay/forget
+mnemush dream                     # nightly: consolidation + neuropilize + cold archive + capacity report
 
-# v1.4: 概念表(唤起索引)
-mnemush concepts --limit 40       # top-N 概念, 注入 agent 上下文
+# v1.4: concept table (priming index)
+mnemush concepts --limit 40       # top-N concepts, injected into agent context
 ```
 
-## For Pi / OpenCode
+## For Pi / OpenCode / DSH
 
 ```bash
 # Pi extension (from your local clone)
 npm install -g /path/to/mnemush/packages/mnemush-pi
-# 或软链到 ~/.pi/agent/extensions/
-# 重启 pi 后: session_start 注入概念表, memory 工具可用, 会话自动捕获
+# or symlink into ~/.pi/agent/extensions/
+# restart pi: session_start injects the concept table, memory tools available, auto-capture on
 ```
 
-- Pi 插件在 `session_start` 注入 `[memory index] N concepts` 唤起索引,memory 写入后自动刷新
-- 启发式捕获:corrections、"remember X"、工具错误自动入库
-- `mnemush-worker` agent 可独立使用全套 memory 工具
+- Pi extension injects `[memory index] N concepts` at session_start and refreshes on memory writes
+- Heuristic capture: corrections, "remember X", tool errors auto-imported
+- `mnemush-worker` agent can use the full memory toolset standalone
+
+```bash
+# DeepSeek Harness (DSH) plugin — native Cordis plugin (install from the local clone)
+dsh plugin --profile web add -w /path/to/mnemush/packages/mnemush-dsh
+# then enable it in the profile's cordis.patch.yml (must use `insert:`):
+#   - insert:
+#       - id: mnemush
+#         name: mnemush-dsh
+#         config: { conceptLimit: 40 }
+```
+
+- DSH plugin registers all 16 memory tools (`memory_add`, `memory_search`, …, `identity_reject`)
+- Injects the `[memory index]` concept table into the system prompt and refreshes it on writes
+- Runs the same session-end maintenance (prune / edge-decay / needs-review / eval-prune) on `session/disposed`
+
+See [packages/mnemush-dsh/README.md](packages/mnemush-dsh/README.md).
 
 ## Features
 
-- **两层记忆架构** — neuropils(文件树内容)+ mushroom_body(索引/图)
-- **语义检索** — MiniMax embo-01 向量 + FTS5 混合(中文↔英文零重叠可命中)
-- **图结构 LTM** — 记忆互连,add 时 auto-link;PageRank/社区发现
-- **LLM 巩固 + 主动遗忘** — consolidate/dream,双阈值 + 保护规则(importance≥0.7/never_prune/identity/7天)
-- **容量自治** — 100MB 硬阈值驱逐链 + neuropil 化 + 冷归档打包
-- **概念表唤起** — agent 上下文常驻记忆索引
-- **身份层** — USER/PERSONA/CONSTITUTION 每会话注入
-- **单二进制** — ~5-12 MB,无 Python/Docker/云
+- **Two-layer memory** — neuropils (file-tree content) + mushroom_body (index/graph)
+- **Semantic recall** — MiniMax embo-01 vectors blended with FTS5 (zero-overlap CN↔EN queries hit)
+- **Graph LTM** — memories interlink, auto-link on add; PageRank/communities
+- **LLM consolidation + active forgetting** — consolidate/dream, dual-threshold + protection (importance≥0.7/never_prune/identity/7d)
+- **Capacity self-governance** — 100MB cap eviction chain + neuropilization + cold archive
+- **Concept-table priming** — persistent memory index in agent context
+- **Identity layer** — USER/PERSONA/CONSTITUTION injected every session
+- **Single binary** — ~5-12 MB, no Python/Docker/cloud
 
 ## Configuration
 
-所有参数在 `~/.mnemush/config.toml`(示例见 [docs/config.example.toml](docs/config.example.toml)):
+Everything is tunable in `~/.mnemush/config.toml` (see [docs/config.example.toml](docs/config.example.toml)):
 
-- `[forgetting]` — half-life、prune 阈值、访问提升
-- `[capacity]` — `max_db_mb`(物理上限)、`cold_days`(冷判定)、`dream_sample_m`(dream 采样延伸度)
-- `[embedding]` — 语义检索开关 + MiniMax 模型
-- `[project]` — 多项目隔离(MNEMUSH_PROJECT)
-- `[edges]` — auto-link/auto-merge 阈值
+- `[forgetting]` — half-life, prune thresholds, access boost
+- `[capacity]` — `max_db_mb` (physical cap), `cold_days` (cold judgment), `dream_sample_m` (dream sampling fan-out)
+- `[embedding]` — semantic recall toggle + MiniMax model
+- `[project]` — multi-project isolation (MNEMUSH_PROJECT)
+- `[edges]` — auto-link / auto-merge thresholds
 
 ## Project layout
 
 ```
 crates/mnemush/        — Rust core(binary + lib)
-  src/neuropils.rs     — 文件树导入/导出(内容层)
-  src/consolidate.rs   — LLM 巩固 + dream 引擎
-  src/capacity.rs      — 容量驱逐/摘要入口/冷压缩
-  src/concepts.rs      — 概念表排序 + title 压缩
-  src/llm.rs           — MiniMax/DeepSeek 聊天客户端
-  src/memory.rs        — add/search/get/update + 语义召回
-  src/embeddings.rs    — MiniMax embo-01 向量
-  src/edge.rs          — 图边 + BFS 邻居
-  src/forget.rs        — 遗忘曲线 + prune + 遗忘痕迹
-packages/mnemush-pi/   — Pi 扩展(概念表注入 + memory 工具)
-packages/mnemush-opencode/ — OpenCode 插件
-packages/mnemush-client/   — 共享 TS 客户端
-docs/                  — 架构/决策/配置示例/superpowers 设计档案
+  src/neuropils.rs     — file-tree import/export (content layer)
+  src/consolidate.rs   — LLM consolidation + dream engine
+  src/capacity.rs      — capacity eviction / summary entries / cold archive
+  src/concepts.rs      — concept table ranking + title compression
+  src/llm.rs           — MiniMax/DeepSeek chat client
+  src/memory.rs        — add/search/get/update + semantic recall
+  src/embeddings.rs    — MiniMax embo-01 vectors
+  src/edge.rs          — graph edges + BFS neighbors
+  src/forget.rs        — forgetting curve + prune + forget traces
+packages/mnemush-pi/   — Pi extension (concept-table injection + memory tools)
+packages/mnemush-opencode/ — OpenCode plugin
+packages/mnemush-dsh/  — DeepSeek Harness (DSH) plugin (memory tools + concept priming + maintenance)
+packages/mnemush-client/   — shared TS client
+docs/                  — architecture / decisions / config example / superpowers design archive
 ```
 
 ## Development
@@ -155,14 +176,14 @@ cargo run --manifest-path crates/mnemush/Cargo.toml -- search "jose"
 cargo run --manifest-path crates/mnemush/Cargo.toml --bin mnemush-mcp
 ```
 
-187 Rust tests green at HEAD (169 lib + 18 bin), plus 3 TS extension tests.
+180 Rust tests green at HEAD (162 lib + 18 bin), plus TS tests across all four packages (client 39 / opencode 31 integration).
 
 ## Documentation
 
-- [ARCHITECTURE.md](ARCHITECTURE.md) — 架构与模块
-- [docs/decisions.md](docs/decisions.md) — 设计决策记录
-- [docs/config.example.toml](docs/config.example.toml) — 配置参考
-- [docs/superpowers/](docs/superpowers/) — 设计档案(specs + plans)
+- [ARCHITECTURE.md](ARCHITECTURE.md) — architecture & modules
+- [docs/decisions.md](docs/decisions.md) — design decision record
+- [docs/config.example.toml](docs/config.example.toml) — config reference
+- [docs/superpowers/](docs/superpowers/) — design archive (specs + plans)
 
 ## License
 

@@ -16,7 +16,7 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
@@ -219,6 +219,237 @@ export function isMnemushTool(name: string): boolean {
     name.startsWith("identity") ||
     name.startsWith("mnemush")
   );
+}
+
+// ── Concept table helpers (context-priming index, shared) ─────────
+
+export interface ConceptEntry {
+  title: string;
+  category: string;
+  importance: number;
+  score: number;
+}
+
+/** 概念表注入文本: 唤起索引(详情走 memory 工具)。空 → 空串(不注入)。 */
+export function buildConceptInject(concepts: ConceptEntry[]): string {
+  if (concepts.length === 0) return "";
+  const lines = concepts.map((c) => `· ${c.title} (${c.category})`).join("\n");
+  return `[memory index] ${concepts.length} concepts (detail via memory tool):\n${lines}`;
+}
+
+/**
+ * 解析 `mnemush concepts --format json` 输出: 兼容 spec 的
+ * `{"concepts": [...], "count": N}`(主用)与旧版裸数组。无效输入 → []。
+ */
+export function parseConceptsJson(raw: string): ConceptEntry[] {
+  let data: unknown;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  const arr = Array.isArray(data)
+    ? data
+    : (data as { concepts?: unknown[] } | null)?.concepts ?? [];
+  return arr.filter(
+    (e): e is ConceptEntry =>
+      !!e && typeof e.title === "string" && typeof e.category === "string",
+  );
+}
+
+/** Resolve the `mnemush` CLI path, preferring the sibling of the MCP binary. */
+export function findMnemushCli(): string {
+  const mcp = findMnemushBinary();
+  if (mcp) {
+    const cli = mcp.replace(/mnemush-mcp/, "mnemush");
+    if (cli !== mcp && existsSync(cli)) return cli;
+  }
+  return "mnemush"; // PATH fallback
+}
+
+/**
+ * 调 `mnemush concepts --limit N --format json`, 解析 → 注入文本。
+ * 失败/空 → null(静默, 不阻塞会话)。3s 超时兜底。
+ */
+export async function loadConceptInject(limit = 40, dataDir?: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    let out = "";
+    let settled = false;
+    const finish = (v: string | null) => {
+      if (!settled) {
+        settled = true;
+        resolve(v);
+      }
+    };
+    const env: NodeJS.ProcessEnv = { ...process.env };
+    if (dataDir) env.MNEMUSH_DATA_DIR = dataDir;
+    const proc = spawn(findMnemushCli(), ["concepts", "--limit", String(limit), "--format", "json"], {
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    proc.stdout.on("data", (c: Buffer) => (out += c.toString()));
+    proc.stderr.on("data", () => { /* swallow */ });
+    const timer = setTimeout(() => proc.kill("SIGTERM"), 3000);
+    proc.on("error", () => {
+      clearTimeout(timer);
+      finish(null);
+    });
+    proc.on("exit", () => {
+      clearTimeout(timer);
+      finish(buildConceptInject(parseConceptsJson(out.trim())) || null);
+    });
+  });
+}
+
+// ── Session-end maintenance + eval log (shared by all adapters) ─────
+
+/** Spawn the `mnemush` CLI with a bounded timeout. Never rejects. */
+function spawnCli(
+  args: string[],
+  dataDir: string | undefined,
+  timeoutMs: number,
+): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    const env: NodeJS.ProcessEnv = { ...process.env };
+    if (dataDir) env.MNEMUSH_DATA_DIR = dataDir;
+    let settled = false;
+    const done = (code: number | null, stdout: string, stderr: string) => {
+      if (!settled) {
+        settled = true;
+        resolve({ code, stdout, stderr });
+      }
+    };
+    const proc = spawn(findMnemushCli(), args, { env, stdio: ["ignore", "pipe", "pipe"] });
+    let out = "";
+    let err = "";
+    proc.stdout.on("data", (c: Buffer) => (out += c.toString()));
+    proc.stderr.on("data", (c: Buffer) => (err += c.toString()));
+    const timer = setTimeout(() => {
+      proc.kill("SIGTERM");
+      done(null, out, err);
+    }, timeoutMs);
+    proc.on("error", () => {
+      clearTimeout(timer);
+      done(null, out, err);
+    });
+    proc.on("exit", (code) => {
+      clearTimeout(timer);
+      done(code, out, err);
+    });
+  });
+}
+
+/**
+ * Run the session-end maintenance pass: prune / edge-decay /
+ * needs-review / eval-prune, gated by the same `MNEMUSH_*_ON_SESSION_END`
+ * env vars the Pi extension honors. Hard-delete (`--isolate`) is NEVER
+ * auto-run. Never rejects — a broken binary skips silently. Returns
+ * each command's captured stdout (trimmed) keyed by command name.
+ */
+/**
+ * 会话驱动的 dream 调度(方案 B): 距上次 dream > minIntervalMs(默认 24h)
+ * → 后台触发 `mnemush dream`(巩固 + neuropil 化 + 冷归档 + 容量报告)。
+ *
+ * - 状态文件 `<dataDir>/dream_last_run.json`(与 consolidate.json 同级);
+ * - 先写状态再跑(ms 级并发窗口, 双会话同时到期的概率可忽略);
+ * - fire-and-forget: 不阻塞会话; dream 耗时 ~1min, 完成后 onOutput 收最后一行。
+ * - 失败静默(无状态文件/CLI 缺失/超时均不报错, 会话照常)。
+ */
+export async function maybeRunDream(opts: {
+  dataDir?: string;
+  minIntervalMs?: number;
+  onOutput?: (line: string) => void;
+} = {}): Promise<boolean> {
+  const intervalMs = opts.minIntervalMs ?? 24 * 3600 * 1000;
+  const dataDir =
+    opts.dataDir ??
+    (process.env.MNEMUSH_DATA_DIR
+      ? process.env.MNEMUSH_DATA_DIR
+      : join(homedir(), ".mnemush"));
+  const statePath = join(dataDir, "dream_last_run.json");
+  try {
+    const now = Date.now();
+    let last = 0;
+    try {
+      last = JSON.parse(readFileSync(statePath, "utf8")).last_run ?? 0;
+    } catch {
+      /* 无状态文件 → 首次, 视为到期 */
+    }
+    if (now - last < intervalMs) return false; // 未到期, 跳过
+    // 先写状态(占位)再跑: 若中途失败, 下次会话会重试(24h 后)
+    mkdirSync(dataDir, { recursive: true });
+    writeFileSync(statePath, JSON.stringify({ last_run: now }));
+    void (async () => {
+      try {
+        const { stdout } = await spawnCli(["dream"], dataDir, 600_000);
+        const lastLine = stdout.trim().split("\n").filter(Boolean).pop() ?? "";
+        opts.onOutput?.(lastLine);
+      } catch {
+        /* dream 失败静默 — 下次会话重试 */
+      }
+    })();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function runSessionEndMaintenance(opts: { dataDir?: string } = {}): Promise<Map<string, string>> {
+  const results = new Map<string, string>();
+  const run = async (name: string, args: string[], timeoutMs: number) => {
+    const { stdout } = await spawnCli(args, opts.dataDir, timeoutMs);
+    results.set(name, stdout.trim());
+  };
+  const pruneMode = process.env.MNEMUSH_PRUNE_ON_SESSION_END ?? "apply";
+  if (pruneMode !== "off" && pruneMode !== "0") {
+    const limit = process.env.MNEMUSH_PRUNE_SESSION_LIMIT ?? "5";
+    const args = ["prune", "--limit", limit];
+    if (pruneMode === "apply" || pruneMode === "1" || pruneMode === "true") args.push("--apply");
+    await run("prune", args, 5000);
+  }
+  if ((process.env.MNEMUSH_EDGE_DECAY_ON_SESSION_END ?? "on") !== "off") {
+    await run("edge-decay", ["edge-decay"], 5000);
+  }
+  if ((process.env.MNEMUSH_NEEDS_REVIEW_ON_SESSION_END ?? "on") !== "off") {
+    const grace = process.env.MNEMUSH_NEEDS_REVIEW_GRACE_DAYS ?? "1";
+    await run("needs-review", ["process-needs-review", "--grace-days", grace], 5000);
+  }
+  if ((process.env.MNEMUSH_EVAL_PRUNE_ON_SESSION_END ?? "on") !== "off") {
+    await run("eval-prune", ["eval", "prune", "--apply"], 5000);
+  }
+  return results;
+}
+
+// Per-session write chain so concurrent hook calls don't interleave NDJSON lines.
+const evalWriters = new Map<string, Promise<void>>();
+
+/**
+ * Append one NDJSON line to `~/.mnemush/eval/<session>.ndjson`, serialized
+ * per session. Best-effort — a write failure never propagates.
+ */
+export function appendEvalLog(entry: Record<string, unknown>): Promise<void> {
+  const session = String(entry.session ?? "unknown");
+  const prev = evalWriters.get(session) ?? Promise.resolve();
+  const next = prev.then(async () => {
+    try {
+      const fs = await import("node:fs/promises");
+      const path = await import("node:path");
+      const os = await import("node:os");
+      const dataDir = process.env.MNEMUSH_DATA_DIR ?? path.join(os.homedir(), ".mnemush");
+      const evalDir = path.join(dataDir, "eval");
+      await fs.mkdir(evalDir, { recursive: true });
+      await fs.appendFile(path.join(evalDir, `${session}.ndjson`), JSON.stringify(entry) + "\n", "utf8");
+    } catch (e) {
+      console.error(`[mnemush] eval log write failed: ${e}`);
+    }
+  });
+  evalWriters.set(
+    session,
+    next.finally(() => {
+      if (evalWriters.get(session) === next) evalWriters.delete(session);
+    }),
+  );
+  return next;
 }
 
 // ── JSON-RPC plumbing ──────────────────────────────────────────

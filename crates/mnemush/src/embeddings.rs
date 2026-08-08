@@ -336,61 +336,6 @@ impl Store {
         Ok(out)
     }
 
-    /// Fetch embeddings for a specific set of memory ids (one model).
-    /// Used by the search-blend path to avoid loading the entire
-    /// `all_embeddings` set. Empty input → empty output.
-    pub fn embeddings_for(
-        &self,
-        memory_ids: &[String],
-        model: &str,
-    ) -> Result<Vec<StoredEmbedding>> {
-        if memory_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        let placeholders: Vec<&str> = memory_ids.iter().map(|_| "?").collect();
-        let sql = format!(
-            "SELECT memory_id, model, dim, vec FROM memory_embedding \
-             WHERE model = ? AND memory_id IN ({})",
-            placeholders.join(",")
-        );
-        let mut stmt = self.conn.prepare(&sql)?;
-        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(model.to_string())];
-        for id in memory_ids {
-            params_vec.push(Box::new(id.clone()));
-        }
-        let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|b| &**b).collect();
-        let rows = stmt.query_map(param_refs.as_slice(), |row| {
-            let bytes: Vec<u8> = row.get(3)?;
-            let dim: i64 = row.get(2)?;
-            let mut v = Vec::with_capacity(dim as usize);
-            for chunk in bytes.chunks_exact(4) {
-                let arr: [u8; 4] = chunk.try_into().unwrap();
-                v.push(f32::from_le_bytes(arr));
-            }
-            Ok(StoredEmbedding {
-                memory_id: row.get(0)?,
-                model: row.get(1)?,
-                dim,
-                vec: v,
-            })
-        })?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
-    }
-
-    /// How many embeddings we have for `model` (across all memories).
-    pub fn count_embeddings(&self, model: &str) -> Result<i64> {
-        let n: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM memory_embedding WHERE model = ?1",
-            params![model],
-            |r| r.get(0),
-        )?;
-        Ok(n)
-    }
-
     /// Delete embeddings for a memory id (all models). Used when a
     /// memory is hard-deleted.
     pub fn delete_embeddings_for(&self, memory_id: &str) -> Result<()> {
@@ -441,25 +386,6 @@ CREATE TABLE IF NOT EXISTS memory_embedding (
 CREATE INDEX IF NOT EXISTS idx_embedding_model ON memory_embedding(model);
 "#;
 
-/// Brute-force top-N search by cosine similarity. Returns memory_ids
-/// sorted by descending similarity (highest first). Skips ids with
-/// no embedding (and ids in `exclude`).
-pub fn top_n_cosine(
-    query: &[f32],
-    candidates: &[(String, Vec<f32>)],
-    n: usize,
-    exclude: &[String],
-) -> Vec<(String, f32)> {
-    let mut scored: Vec<(String, f32)> = candidates
-        .iter()
-        .filter(|(id, _)| !exclude.contains(id))
-        .map(|(id, v)| (id.clone(), cosine(query, v)))
-        .collect();
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    scored.truncate(n);
-    scored
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -485,32 +411,6 @@ mod tests {
         assert_eq!(cosine(&v, &z), 0.0);
     }
 
-    #[test]
-    fn top_n_cosine_ranks_correctly() {
-        let q = vec![1.0, 0.0, 0.0];
-        let cands = vec![
-            ("a".into(), vec![1.0, 0.0, 0.0]),  // cosine 1.0
-            ("b".into(), vec![0.9, 0.1, 0.0]),  // ~0.99
-            ("c".into(), vec![0.0, 1.0, 0.0]),  // 0
-            ("d".into(), vec![-1.0, 0.0, 0.0]), // -1
-        ];
-        let top = top_n_cosine(&q, &cands, 3, &[]);
-        assert_eq!(top[0].0, "a");
-        assert_eq!(top[1].0, "b");
-        // c is in top 3 (cosine 0), d excluded (negative)
-        assert_eq!(top[2].0, "c");
-        assert!(!top.iter().any(|(id, _)| id == "d"));
-    }
-
-    #[test]
-    fn top_n_cosine_respects_exclude() {
-        let q = vec![1.0, 0.0];
-        let cands = vec![("a".into(), vec![1.0, 0.0]), ("b".into(), vec![0.9, 0.1])];
-        let top = top_n_cosine(&q, &cands, 5, &["a".into()]);
-        assert_eq!(top.len(), 1);
-        assert_eq!(top[0].0, "b");
-    }
-
     /// End-to-end: embed-ish roundtrip using fake unit vectors.
     /// We can't run a real model in unit tests (no network), so
     /// we synthesize vectors and exercise the storage path.
@@ -534,7 +434,6 @@ mod tests {
             .get_embedding("nonexistent", "model-x")
             .unwrap()
             .is_none());
-        assert_eq!(store.count_embeddings("model-x").unwrap(), 1);
     }
 
     #[test]

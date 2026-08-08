@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mnemush — brain-inspired memory for AI coding agents</title>
+<style>
+  :root {
+    --bg: #0b0d12;
+    --bg2: #11141c;
+    --fg: #e8eaf0;
+    --dim: #9aa1b0;
+    --accent: #6ee7c8;
+    --accent2: #8b8bf0;
+    --border: #232836;
+    --code-bg: #0d1017;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .container { max-width: 960px; margin: 0 auto; padding: 0 24px; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  /* nav */
+  nav {
+    position: sticky; top: 0; z-index: 10;
+    background: rgba(11, 13, 18, .85); backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--border);
+  }
+  nav .container { display: flex; align-items: center; gap: 24px; height: 52px; }
+  nav .brand { font-weight: 700; font-size: 15px; letter-spacing: .3px; }
+  nav .brand span { color: var(--accent); }
+  nav .links { margin-left: auto; display: flex; gap: 18px; font-size: 13.5px; color: var(--dim); }
+  nav .links a { color: var(--dim); }
+  nav .links a:hover { color: var(--fg); }
+
+  /* hero */
+  .hero { padding: 96px 0 64px; }
+  .hero h1 {
+    font-size: clamp(34px, 6vw, 56px);
+    font-weight: 800; line-height: 1.1; letter-spacing: -.5px;
+    max-width: 18ch;
+  }
+  .hero h1 .grad {
+    background: linear-gradient(90deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .hero p.sub {
+    margin-top: 20px; font-size: 17px; color: var(--dim); max-width: 56ch;
+  }
+
+  /* install tabs */
+  .install { margin-top: 36px; }
+  .tabs { display: flex; gap: 4px; }
+  .tab {
+    padding: 7px 14px; font-size: 13px; cursor: pointer; color: var(--dim);
+    border: 1px solid var(--border); border-bottom: none;
+    border-radius: 8px 8px 0 0; background: var(--bg2);
+  }
+  .tab.active { color: var(--fg); background: var(--code-bg); border-color: var(--accent); }
+  .code {
+    background: var(--code-bg); border: 1px solid var(--border);
+    border-radius: 0 8px 8px 8px; padding: 18px 20px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 13.5px; overflow-x: auto; white-space: pre;
+  }
+  .code .cmt { color: #55606e; }
+
+  /* sections */
+  section { padding: 64px 0; border-top: 1px solid var(--border); }
+  .sec-label { font-size: 13px; letter-spacing: 1.5px; text-transform: uppercase; color: var(--accent2); font-weight: 600; }
+  h2 { font-size: clamp(24px, 3.6vw, 34px); font-weight: 700; margin: 10px 0 18px; letter-spacing: -.3px; }
+  p.body { color: var(--dim); max-width: 62ch; font-size: 15.5px; }
+
+  /* cards */
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; margin-top: 28px; }
+  .card {
+    background: var(--bg2); border: 1px solid var(--border); border-radius: 12px;
+    padding: 20px; transition: border-color .15s;
+  }
+  .card:hover { border-color: var(--accent); }
+  .card h3 { font-size: 15.5px; margin-bottom: 8px; }
+  .card p { font-size: 13.5px; color: var(--dim); }
+
+  /* two-layer diagram */
+  .layers { margin-top: 28px; display: flex; flex-direction: column; gap: 0; }
+  .layer {
+    border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px;
+    background: var(--bg2);
+  }
+  .layer .tag { font-size: 12px; font-weight: 700; letter-spacing: 1px; }
+  .layer.neuropils .tag { color: var(--accent); }
+  .layer.mb .tag { color: var(--accent2); }
+  .layer p { font-size: 13.5px; color: var(--dim); margin-top: 6px; }
+  .flow { text-align: center; color: var(--dim); font-size: 13px; padding: 8px 0; font-family: ui-monospace, monospace; }
+
+  /* commands */
+  .cmd { margin: 10px 0; }
+  .cmd .line { color: var(--accent); }
+  .cmd .desc { color: var(--dim); }
+
+  /* brain mapping table */
+  table { width: 100%; border-collapse: collapse; margin-top: 24px; font-size: 14px; }
+  th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--border); }
+  th { color: var(--dim); font-weight: 600; font-size: 12.5px; letter-spacing: 1px; text-transform: uppercase; }
+  td .mono { font-family: ui-monospace, monospace; color: var(--accent); }
+
+  /* footer */
+  footer { border-top: 1px solid var(--border); padding: 32px 0 40px; }
+  footer .container { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px; font-size: 13px; color: var(--dim); }
+  footer .links { display: flex; gap: 18px; }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="container">
+    <div class="brand">🧠 mnemush<span>.</span></div>
+    <div class="links">
+      <a href="#why">Why</a>
+      <a href="#architecture">Architecture</a>
+      <a href="#commands">Commands</a>
+      <a href="https://github.com/Yunoinsky/mnemush">GitHub</a>
+      <a href="https://github.com/Yunoinsky/mnemush/blob/main/README.md">Docs</a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="container">
+    <h1>Memory that<br>remembers <span class="grad">like a brain</span></h1>
+    <p class="sub">
+      Mnemush is persistent, brain-inspired memory for AI coding agents.
+      A file tree is your <b>neuropil</b> — content, versioned and greppable.
+      The database is your <b>mushroom body</b> — index, graph, and recall.
+      Your agents stop re-learning what they already knew.
+    </p>
+
+    <div class="install">
+      <div class="tabs">
+        <div class="tab active" data-tab="curl">curl</div>
+        <div class="tab" data-tab="npm">npm</div>
+        <div class="tab" data-tab="cargo">cargo</div>
+      </div>
+      <div class="code" id="code-curl"><span class="cmt"># install from your clone (or a release tarball)</span>
+curl -fsSL https://raw.githubusercontent.com/Yunoinsky/mnemush/main/scripts/install.sh | sh</div>
+      <div class="code" id="code-npm" style="display:none"><span class="cmt"># Pi extension + client</span>
+npm install -g mnemush-pi</div>
+      <div class="code" id="code-cargo" style="display:none"><span class="cmt"># build from source</span>
+git clone https://github.com/Yunoinsky/mnemush.git
+cd mnemush && ./scripts/install.sh</div>
+    </div>
+  </div>
+</header>
+
+<section id="why">
+  <div class="container">
+    <div class="sec-label">Why Mnemush</div>
+    <h2>Your agents stop forgetting what they learned</h2>
+    <p class="body">
+      Agents today restart with amnesia every session. Mnemush gives them a
+      persistent memory that consolidates itself — the way sleep consolidates
+      a day's experiences into durable knowledge.
+    </p>
+    <div class="grid">
+      <div class="card"><h3>🔎 Semantic recall</h3><p>Vector + FTS5 hybrid search. Chinese↔English zero-overlap queries still hit.</p></div>
+      <div class="card"><h3>🕸️ Graph LTM</h3><p>Memories interlink on add. PageRank hubs, community detection, spreading activation.</p></div>
+      <div class="card"><h3>🌙 LLM consolidation</h3><p><code>consolidate</code>/<code>dream</code>: LLM updates, links, merges, insights, and actively forgets — with protection rules.</p></div>
+      <div class="card"><h3>🧠 Concept table</h3><p>An injected priming index tells your agent what it can recall. Prefrontal cues, hippocampus extraction.</p></div>
+      <div class="card"><h3>⚖️ Self-governing capacity</h3><p>100MB cap, eviction chain, neuropilization, cold archive. Memory stays tractable forever.</p></div>
+      <div class="card"><h3>🧩 Cross-agent</h3><p>One shared DB behind MCP. Pi, OpenCode, any MCP client — same memory, everywhere.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="architecture">
+  <div class="container">
+    <div class="sec-label">Architecture</div>
+    <h2>Two layers, like a brain</h2>
+    <div class="layers">
+      <div class="layer neuropils">
+        <div class="tag">NEUROPILS — content layer · file tree</div>
+        <p>Any markdown directory tree is memory. Files are the authoritative source: greppable, cat-able, Git-versioned. <code>mnemush import-tree &lt;dir&gt;</code> syncs it into the index.</p>
+      </div>
+      <div class="flow">▲ import-tree &nbsp;·&nbsp; neuropilize + summary entry ▼</div>
+      <div class="layer mb">
+        <div class="tag">MUSHROOM_BODY — index layer · SQLite</div>
+        <p>Agent experience: full text + vectors + graph. Summary entries for neuropilized memories. Cross-cluster edges. Consolidation, forgetting, and capacity live here.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="commands">
+  <div class="container">
+    <div class="sec-label">Try it</div>
+    <h2>Commands that run the memory</h2>
+    <div class="grid" style="grid-template-columns:1fr">
+      <div class="cmd"><span class="code" style="display:block;border-radius:8px"><span class="line">$ mnemush add</span> "use jose not jsonwebtoken" --category decision --importance 0.9
+<span class="line">$ mnemush search</span> "jose"                        <span class="cmt"># semantic + FTS</span>
+<span class="line">$ mnemush dream</span>                              <span class="cmt"># nightly: consolidate + neuropilize + archive</span>
+<span class="line">$ mnemush consolidate</span> --dry-run              <span class="cmt"># preview the LLM's plan</span>
+<span class="line">$ mnemush concepts</span> --limit 40                <span class="cmt"># priming index for the agent</span>
+<span class="line">$ mnemush import-tree</span> ~/notes --project wiki  <span class="cmt"># any file tree is memory</span>
+<span class="line">$ mnemush status</span>                             <span class="cmt"># capacity + neuropil entries</span></span></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <div class="sec-label">Brain mapping</div>
+    <h2>Neuroscience, implemented</h2>
+    <table>
+      <tr><th>Mnemush</th><th>Brain</th><th>What it does</th></tr>
+      <tr><td class="mono">neuropils</td><td>Cortex</td><td>Content stored in place, in the file tree</td></tr>
+      <tr><td class="mono">mushroom_body</td><td>Hippocampus / mushroom body</td><td>Index + associations over content</td></tr>
+      <tr><td class="mono">consolidate</td><td>Memory consolidation</td><td>Integrate new experience into the network</td></tr>
+      <tr><td class="mono">dream</td><td>Sleep replay</td><td>Full pass with a forgetting peak</td></tr>
+      <tr><td class="mono">concept table</td><td>Prefrontal cues</td><td>Know what exists, extract on demand</td></tr>
+      <tr><td class="mono">forget_trace</td><td>Forgetting trace</td><td>Forgetting itself is information</td></tr>
+    </table>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <div>🧠 Mnemush — persistent memory for agents</div>
+    <div class="links">
+      <a href="https://github.com/Yunoinsky/mnemush">GitHub</a>
+      <a href="https://github.com/Yunoinsky/mnemush/blob/main/README.md">Docs</a>
+      <a href="https://github.com/Yunoinsky/mnemush/blob/main/CHANGELOG.md">Changelog</a>
+    </div>
+  </div>
+</footer>
+
+<script>
+  document.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+      document.querySelectorAll('.code').forEach(c => c.style.display = 'none');
+      document.getElementById('code-' + tab.dataset.tab).style.display = 'block';
+    });
+  });
+</script>
+</body>
+</html>

@@ -2,6 +2,41 @@
 
 Manual checklist for cutting a release. Currently no automation — pin versions, build, smoke-test, tag, push.
 
+## Publish targets
+
+Three distribution channels, all versioned 1.0.0 (kept in lockstep):
+
+1. **npm** — `mnemush-pi`(pi 扩展, `pi install npm:mnemush-pi`)、`mnemush-client`(共享 TS 库)、`mnemush-opencode`
+2. **crates.io** — `mnemush` 二进制(`cargo install mnemush`)
+3. **GitHub** — 源码仓库(release tarball + install.sh)
+
+## npm publish checklist
+
+```bash
+# 1. 构建 TS(发布包只含 dist, 必须先 build)
+for p in mnemush-client mnemush-pi mnemush-opencode; do (cd packages/$p && npm run build); done
+
+# 2. 验证包内容
+for p in mnemush-client mnemush-pi mnemush-opencode; do (cd packages/$p && npm pack --dry-run); done
+
+# 3. 登录 + 发布(client 先于 pi/opencode, 因为它们是依赖)
+npm login
+(cd packages/mnemush-client && npm publish)
+(cd packages/mnemush-pi && npm publish)
+(cd packages/mnemush-opencode && npm publish)
+```
+
+## crates.io publish checklist
+
+```bash
+# 1. 验证打包(依赖必须在 crates.io 可解析)
+cd crates/mnemush && cargo package --allow-dirty --no-verify
+
+# 2. 登录 + 发布
+cargo login
+cargo publish
+```
+
 ## Pre-release
 
 1. **Bump versions.** All four must match:

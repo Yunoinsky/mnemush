@@ -82,19 +82,6 @@ fn sync_fts(api: &MemoryApi, id: &str, old_content: &str) -> Result<()> {
     Ok(())
 }
 
-/// neuropil 化候选: category ∈ {note, skill}, content 非空, 且非已归档(无 neuropil: context)。
-pub fn neuropilize_candidates(api: &MemoryApi, limit: usize) -> Result<Vec<crate::schema::Memory>> {
-    let all = api.list_in_project(100000, None)?;
-    Ok(all
-        .into_iter()
-        .filter(|m| m.deleted_at.is_none())
-        .filter(|m| matches!(m.category, crate::schema::Category::Note | crate::schema::Category::Skill))
-        .filter(|m| !m.content.is_empty())
-        .filter(|m| !m.context.as_deref().map_or(false, |c| c.starts_with("neuropil:")))
-        .take(limit)
-        .collect())
-}
-
 /// 活数据估算 MB(驱逐可收敛): 活跃记忆 content 字节 + 活跃记忆的向量字节
 /// + 边估算(128B/条) + 8MB 固定开销(FTS 索引/元数据)。
 /// 向量只算活跃记忆; 边只算两端都活跃的(驱逐一端后其边不再计入,
@@ -223,23 +210,6 @@ pub fn enforce_capacity(api: &MemoryApi) -> Result<CapacityReport> {
         }
     }
     Ok(rep)
-}
-
-/// 从文件树恢复全文(neuropil 化反向)。
-pub fn restore_from_entry(api: &MemoryApi, id: &str, content: &str) -> Result<()> {
-    let Some(mut m) = api.get(id)? else { return Ok(()); };
-    let old_content = m.content.clone(); // 恢复前先取旧摘要, FTS 删除按它匹配
-    m.content = content.to_string();
-    m.content_hash = MemoryApi::content_hash(content);
-    if let Some(ctx) = m.context.as_deref() {
-        if ctx.starts_with("neuropil:") {
-            m.context = None;
-        }
-    }
-    api.update(&m)?;
-    // 恢复全文后同样对齐 FTS5(见 sync_fts)
-    sync_fts(api, id, &old_content)?;
-    Ok(())
 }
 
 /// 冷判定: 入口 last_accessed_at > cold_days 且 文件 mtime 未改 > cold_days。
@@ -601,42 +571,6 @@ mod tests {
         assert!(m.title.contains("概念"), "title kept");
     }
 
-    #[test]
-    fn restore_from_entry_puts_content_back() {
-        let (store, cfg) = test_store();
-        let api = MemoryApi::new(&store, &cfg);
-        let id = api.add(NewMemory::note("full", "t")).unwrap().id;
-        degrade_to_entry(&api, &id, "p.md").unwrap();
-        restore_from_entry(&api, &id, "restored full body").unwrap();
-        let m = api.get(&id).unwrap().unwrap();
-        assert_eq!(m.content, "restored full body");
-        assert!(m.context.is_none() || !m.context.as_deref().unwrap().starts_with("neuropil:"), "path marker cleared");
-    }
-
-    #[test]
-    fn neuropilize_candidates_filters_by_category() {
-        let (store, cfg) = test_store();
-        let api = MemoryApi::new(&store, &cfg);
-        api.add(NewMemory::note("concept definition text here", "概念")).unwrap();
-        let mut d = NewMemory::note("decision text", "决策");
-        d.category = crate::schema::Category::Decision;
-        api.add(d).unwrap();
-        let cands = neuropilize_candidates(&api, 100).unwrap();
-        assert!(cands.iter().any(|m| m.title == "概念"));
-        assert!(!cands.iter().any(|m| m.title == "决策"), "decision excluded");
-    }
-
-    /// 已归档记忆(neuropil: context)不能重复成为候选。
-    #[test]
-    fn neuropilize_candidates_excludes_archived_entries() {
-        let (store, cfg) = test_store();
-        let api = MemoryApi::new(&store, &cfg);
-        let id = api.add(NewMemory::note("archived already", "已归档")).unwrap().id;
-        degrade_to_entry(&api, &id, "x.md").unwrap();
-        let cands = neuropilize_candidates(&api, 100).unwrap();
-        assert!(!cands.iter().any(|m| m.id == id), "neuropil: entry excluded");
-    }
-
     /// FTS 同步: degrade 后 search 不再命中旧全文; restore 后恢复命中。
     /// 用短内容使摘要(前 2 句)不含搜索词, 否则命中来自摘要而非旧全文。
     /// 冷判定: 双条件缺一不冷(文件新鲜不冷 / 入口新鲜不冷 / 双旧才冷),
@@ -740,7 +674,7 @@ mod tests {
     }
 
     #[test]
-    fn degrade_restore_sync_fts_search() {
+    fn degrade_syncs_fts_search() {
         let (store, cfg) = test_store();
         let api = MemoryApi::new(&store, &cfg);
         // 搜索词 zebraunique 在第 3 句: 摘要=前 2 句, 不含它。
@@ -757,8 +691,6 @@ mod tests {
         assert!(hit(&api), "old fulltext searchable before degrade");
         degrade_to_entry(&api, &id, "p.md").unwrap();
         assert!(!hit(&api), "degraded entry not hit by old fulltext");
-        restore_from_entry(&api, &id, "first sentence. second sentence. zebraunique tail").unwrap();
-        assert!(hit(&api), "restored fulltext searchable again");
     }
 
     /// R1 回归: FTS rowid 错位下 sync_fts 按 content 删旧行 + 显式 rowid
@@ -836,9 +768,13 @@ mod tests {
             hit(&api, &keep_id, "platypusx"),
             "unrelated memory still searchable (no collateral delete)"
         );
-        // restore 同路径: 旧摘要行按 content 删, 新全文行显式 rowid 重建
-        restore_from_entry(&api, &mis_id, "small wallaby hops. forest floor grazes. quokka unique tail")
-            .unwrap();
+        // 同路径直接触发 sync_fts(恢复全文的场景): 旧摘要行按 content 删,
+        // 新全文行显式 rowid 重建。
+        let mut m = api.get(&mis_id).unwrap().unwrap();
+        let summary = m.content.clone();
+        m.content = "small wallaby hops. forest floor grazes. quokka unique tail".to_string();
+        api.update(&m).unwrap();
+        sync_fts(&api, &mis_id, &summary).unwrap();
         assert_eq!(fts_rows_with(&api, "quokka"), 1, "restored fulltext row rebuilt");
         // R1 search 路由断言: mis 特有词必须命中 mis 本体, 且不得返回 other
         // 的内容(旧实现自增 INSERT 把行落 MAX+1, search 错挂到 other——

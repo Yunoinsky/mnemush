@@ -16,14 +16,6 @@ use crate::error::Result;
 use crate::schema::{Edge, Memory};
 use crate::store::Store;
 
-/// A loaded node: memory row + its outgoing neighbors (directed edges
-/// are followed one-way; bidirectional edges both ways).
-#[derive(Debug)]
-pub struct GraphNode {
-    pub memory: Memory,
-    pub out: Vec<String>,
-}
-
 /// Directed-adjacency form used by the algorithms. `out[i]` lists the
 /// neighbor ids reachable from node `i`.
 pub struct Graph {
@@ -176,13 +168,6 @@ fn esc(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-/// Escape a string for JSON string values.
-fn esc_json(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-}
-
 /// DOT export with an explicit edge list (see [`to_dot`]).
 pub fn export_dot(
     g: &Graph,
@@ -257,61 +242,21 @@ pub fn export_d3(g: &Graph, edges: &[Edge], communities: Option<&[String]>) -> S
             }),
             None => 0,
         };
-        nodes.push(format!(
-            "{{\"id\":\"{}\",\"label\":\"{}\",\"group\":{}}}",
-            m.id,
-            esc_json(&m.title),
-            group
-        ));
+        nodes.push(serde_json::json!({ "id": m.id, "label": m.title, "group": group }));
     }
-    let mut links = Vec::new();
-    for e in edges {
-        links.push(format!(
-            "{{\"source\":\"{}\",\"target\":\"{}\",\"value\":{:.3}}}",
-            e.source_id, e.target_id, e.strength
-        ));
-    }
-    format!(
-        "{{\"nodes\":[{}],\"links\":[{}]}}",
-        nodes.join(","),
-        links.join(",")
-    )
+    let links: Vec<serde_json::Value> = edges
+        .iter()
+        .map(|e| serde_json::json!({ "source": e.source_id, "target": e.target_id, "value": e.strength }))
+        .collect();
+    serde_json::json!({ "nodes": nodes, "links": links }).to_string()
 }
 
 /// Load all non-deleted edges for export.
 pub fn load_edges(store: &Store) -> Result<Vec<Edge>> {
-    let mut stmt = store.conn.prepare(
-        "SELECT id, source_id, target_id, edge_type, strength, initial_strength, \
-         bidirectional, provenance, evidence, context, access_count, last_activated, \
-         stability, created_at, deleted_at \
-         FROM memory_edge WHERE deleted_at IS NULL",
-    )?;
-    let rows = stmt.query_map([], |row| {
-        let bidirectional_i: i32 = row.get(6)?;
-        let access_count_i: i32 = row.get(10)?;
-        let last_activated_ts: Option<i64> = row.get(11)?;
-        let created_at_ts: i64 = row.get(13)?;
-        let deleted_at_ts: Option<i64> = row.get(14)?;
-        Ok(Edge {
-            id: row.get(0)?,
-            source_id: row.get(1)?,
-            target_id: row.get(2)?,
-            edge_type: crate::schema::EdgeType::parse(row.get::<_, String>(3)?.as_str())
-                .unwrap_or(crate::schema::EdgeType::Related),
-            strength: row.get(4)?,
-            initial_strength: row.get(5)?,
-            bidirectional: bidirectional_i != 0,
-            provenance: row.get(7)?,
-            evidence: row.get(8)?,
-            context: row.get(9)?,
-            access_count: access_count_i.max(0) as u32,
-            last_activated: last_activated_ts.and_then(|t| chrono::DateTime::from_timestamp(t, 0)),
-            stability: row.get(12)?,
-            created_at: chrono::DateTime::from_timestamp(created_at_ts, 0)
-                .unwrap_or_else(chrono::Utc::now),
-            deleted_at: deleted_at_ts.and_then(|t| chrono::DateTime::from_timestamp(t, 0)),
-        })
-    })?;
+    let mut stmt = store
+        .conn
+        .prepare("SELECT * FROM memory_edge WHERE deleted_at IS NULL")?;
+    let rows = stmt.query_map([], Store::row_to_edge)?;
     let mut out = Vec::new();
     for r in rows {
         out.push(r?);

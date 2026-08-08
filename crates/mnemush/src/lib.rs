@@ -62,6 +62,15 @@ pub fn expand_tilde(s: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(s)
 }
 
+/// Truncate to the first `n` chars, appending `…` when longer.
+pub fn truncate(s: &str, n: usize) -> String {
+    let mut out: String = s.chars().take(n).collect();
+    if s.chars().count() > n {
+        out.push('…');
+    }
+    out
+}
+
 /// Initialize tracing subscriber. Honors `RUST_LOG`; defaults to `warn`.
 pub fn init_tracing() {
     use tracing_subscriber::{fmt, EnvFilter};

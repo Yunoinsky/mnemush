@@ -252,11 +252,6 @@ impl Store {
         Utc.timestamp_opt(ts, 0).single()
     }
 
-    /// Begin a deferred transaction.
-    pub fn transaction(&mut self) -> Result<Transaction<'_>> {
-        Ok(self.conn.transaction()?)
-    }
-
     /// Begin an unchecked (non-blocking) transaction.
     pub fn unchecked_transaction(&mut self) -> Result<Transaction<'_>> {
         Ok(self.conn.unchecked_transaction()?)
@@ -319,6 +314,17 @@ impl Store {
         tx.execute(
             "INSERT INTO memory_fts(title, content, context, tags) VALUES (?1, ?2, ?3, ?4)",
             params![m.title, m.content, m.context, tags_str],
+        )?;
+        Ok(())
+    }
+
+    /// Delete a memory's FTS row by its memory-table rowid (same tx).
+    /// Keeps the standalone FTS index rowid-aligned with `memory` after
+    /// soft-delete / merge.
+    pub fn delete_fts_for_tx(tx: &Transaction, id: &str) -> Result<()> {
+        tx.execute(
+            "DELETE FROM memory_fts WHERE rowid = (SELECT rowid FROM memory WHERE id = ?1)",
+            params![id],
         )?;
         Ok(())
     }
@@ -471,19 +477,9 @@ impl Store {
         details: Option<&str>,
         actor: &str,
     ) -> Result<()> {
-        self.conn.execute(
-            r#"INSERT INTO memory_event (id, event_type, memory_id, edge_id, details, actor, created_at)
-               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"#,
-            params![
-                uuid::Uuid::new_v4().to_string(),
-                event_type,
-                memory_id,
-                edge_id,
-                details,
-                actor,
-                Self::now_ts(),
-            ],
-        )?;
+        let tx = self.conn.unchecked_transaction()?;
+        self.log_event_tx(&tx, event_type, memory_id, edge_id, details, actor)?;
+        tx.commit()?;
         Ok(())
     }
 

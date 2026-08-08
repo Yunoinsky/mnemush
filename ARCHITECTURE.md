@@ -1,6 +1,6 @@
 # Mnemush Architecture
 
-> Brain-inspired memory layer for AI coding agents. Rust core, TS adapters.
+> Brain-inspired memory layer for AI coding agents. Rust core, TS adapters (Pi / OpenCode / DeepSeek Harness).
 
 ## Design philosophy
 
@@ -77,6 +77,7 @@ bin/cli.rs          — terminal CLI (clap)
 mnemush-client/       — shared library to spawn mnemush binary + MCP RPC
 mnemush-pi/           — Pi extension: 概念表注入(session_start + 写入刷新) + memory 工具
 mnemush-opencode/     — OpenCode plugin (hooks + tools)
+mnemush-dsh/          — DeepSeek Harness (DSH) Cordis plugin: 16 个 memory 工具 + 概念表注入(system prompt) + session/disposed 维护
 ```
 
 ## Data flow

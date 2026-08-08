@@ -141,11 +141,6 @@ enum Cmd {
         /// Actually apply (default is dry-run).
         #[arg(long)]
         apply: bool,
-        /// Force dry-run mode (no-op for clarity, since dry-run is the
-        /// default; included so users coming from apt-get/curl style
-        /// CLIs can be explicit).
-        #[arg(long)]
-        dry_run: bool,
         /// Cap the number of memories processed.
         #[arg(long, short = 'l')]
         limit: Option<usize>,
@@ -344,7 +339,7 @@ enum GraphCmd {
         /// dot | json
         #[arg(long, short = 'f', default_value = "dot")]
         format: String,
-        /// Annotate nodes with PageRank (dot: label suffix; json: rank field).
+        /// Annotate nodes with PageRank (dot: label suffix; json: ignored).
         #[arg(long)]
         ranks: bool,
         /// Color/group nodes by community (dot: color; json: group field).
@@ -648,7 +643,6 @@ fn main() -> anyhow::Result<()> {
         }
         Cmd::Prune {
             apply,
-            dry_run: _,
             limit,
             isolate,
             grace_days,
@@ -753,7 +747,6 @@ fn main() -> anyhow::Result<()> {
             println!("  capacity:    {size:.0}/{limit:.0} MB (neuropil 入口 {np_count})");
         }
         Cmd::EdgeDecay => {
-            let config = mnemush::config::Config::load()?;
             let updated = mnemush::forget::decay_all_edges(&mut store, &config, chrono::Utc::now())?;
             println!("edges decayed: {updated}");
         }
@@ -1005,11 +998,10 @@ fn main() -> anyhow::Result<()> {
                     }
                 }
                 EvalCmd::Prune { apply } => {
-                    let cfg = mnemush::config::Config::load()?;
                     let r = if apply {
-                        mnemush::eval::prune_apply(&cfg.eval)?
+                        mnemush::eval::prune_apply(&config.eval)?
                     } else {
-                        mnemush::eval::prune_dry_run(&cfg.eval)?
+                        mnemush::eval::prune_dry_run(&config.eval)?
                     };
                     println!(
                         "{}: {} file(s) kept, {} lines kept; removed by age={}, by count={}, lines dropped={} (≈{} bytes)",
@@ -1092,11 +1084,6 @@ fn main() -> anyhow::Result<()> {
                     output,
                 } => {
                     let edges = graph::load_edges(&store)?;
-                    let ranks_opt = if ranks {
-                        Some(graph::pagerank(&g, 0.85, 100, 1e-6))
-                    } else {
-                        None
-                    };
                     let com_opt = if communities {
                         Some(graph::label_propagation(&g, 50))
                     } else {
@@ -1104,6 +1091,12 @@ fn main() -> anyhow::Result<()> {
                     };
                     let body = match format.as_str() {
                         "dot" => {
+                            // export_d3 不收 ranks; 只有 dot 需要算 PageRank。
+                            let ranks_opt = if ranks {
+                                Some(graph::pagerank(&g, 0.85, 100, 1e-6))
+                            } else {
+                                None
+                            };
                             graph::export_dot(&g, &edges, ranks_opt.as_deref(), com_opt.as_deref())
                         }
                         "json" => graph::export_d3(&g, &edges, com_opt.as_deref()),
@@ -1262,21 +1255,20 @@ fn main() -> anyhow::Result<()> {
             title_contains,
             force,
         } => {
-            let cfg = mnemush::config::Config::load()?;
-            if !cfg.embedding.enabled {
+            if !config.embedding.enabled {
                 println!(
                     "[mnemush] embeddings not enabled — set `[embeddings] enabled = true` \
                      in ~/.mnemush/config.toml."
                 );
                 return Ok(());
             }
-            let model = cfg.embedding.model.clone();
+            let model = config.embedding.model.clone();
             println!(
                 "[mnemush] loading model {} (downloads on first run)...",
                 model
             );
             let mut emb = mnemush::embeddings::Embedder::new(&model)?;
-            let api = mnemush::memory::MemoryApi::new(&store, &cfg);
+            let api = mnemush::memory::MemoryApi::new(&store, &config);
             let mems = api.list(10_000)?;
             let target: Vec<&mnemush::schema::Memory> = mems
                 .iter()
@@ -1416,12 +1408,8 @@ fn count_by(store: &Store, col: &str) -> anyhow::Result<Vec<(String, i64)>> {
 }
 
 fn truncate(s: &str, n: usize) -> String {
-    let s = s.replace('\n', " ");
-    let mut out: String = s.chars().take(n).collect();
-    if s.chars().count() > n {
-        out.push('…');
-    }
-    out
+    // 展示用: 换行拍平成单行, 再走共享截断逻辑。
+    mnemush::truncate(&s.replace('\n', " "), n)
 }
 
 fn run_prune(
@@ -1549,7 +1537,7 @@ fn short_id(id: &str) -> String {
 }
 
 fn init_dotfiles() -> anyhow::Result<()> {
-    // ponytail: respect MNEMUSH_DATA_DIR like the rest of the codebase;
+    // init must respect MNEMUSH_DATA_DIR like the rest of the codebase;
     // the previous hard-coded $HOME/.mnemush ignored the env override,
     // making `MNEMUSH_DATA_DIR=... mnemush init` pollute the real home dir.
     let data_dir = mnemush::default_data_dir();
@@ -1561,7 +1549,7 @@ fn init_dotfiles() -> anyhow::Result<()> {
     if !config_dst.exists() {
         std::fs::write(
             &config_dst,
-            include_str!("../../../../docs/config.example.toml"),
+            include_str!("../../assets/config.example.toml"),
         )?;
         println!("wrote {}", config_dst.display());
     } else {
@@ -1570,14 +1558,14 @@ fn init_dotfiles() -> anyhow::Result<()> {
 
     // Copy identity templates
     for (name, body) in [
-        ("USER.md", include_str!("../../../../docs/identity/USER.md")),
+        ("USER.md", include_str!("../../assets/identity/USER.md")),
         (
             "PERSONA.md",
-            include_str!("../../../../docs/identity/PERSONA.md"),
+            include_str!("../../assets/identity/PERSONA.md"),
         ),
         (
             "CONSTITUTION.md",
-            include_str!("../../../../docs/identity/CONSTITUTION.md"),
+            include_str!("../../assets/identity/CONSTITUTION.md"),
         ),
     ] {
         let dst = id_dir.join(name);

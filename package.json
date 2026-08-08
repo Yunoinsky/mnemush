@@ -1,12 +1,13 @@
 {
   "name": "mnemush-workspace",
-  "version": "0.2.0",
+  "version": "1.5.0",
   "private": true,
   "description": "Mnemush — brain-inspired memory for AI coding agents. Workspace root.",
   "workspaces": [
     "packages/mnemush-client",
     "packages/mnemush-pi",
-    "packages/mnemush-opencode"
+    "packages/mnemush-opencode",
+    "packages/mnemush-dsh"
   ],
   "devDependencies": {
     "@types/node": "^22.0.0",
@@ -24,5 +25,10 @@
     "docs:ts": "typedoc --out target/docs/tsdoc",
     "docs": "npm run docs:rust && npm run docs:ts"
   },
-  "license": "MulanPSL-2.0"
+  "license": "MulanPSL-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Yunoinsky/mnemush.git"
+  },
+  "author": "Yunoinsky Chen"
 }

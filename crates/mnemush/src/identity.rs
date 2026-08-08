@@ -222,6 +222,11 @@ pub fn list_pending(status: Option<ProposalStatus>) -> Result<Vec<PendingUpdate>
     list_pending_in(&default_identity_dir(), status)
 }
 
+/// Full id or a prefix (≥4 chars) match — the CLI short-form rule.
+fn id_matches(probe: &str, stored_id: &str) -> bool {
+    stored_id == probe || (probe.len() >= 4 && stored_id.starts_with(probe))
+}
+
 /// Find a specific proposal by id (any status). Used by the MCP layer
 /// to distinguish "not found" from "already resolved". Returns `None`
 /// if no proposal in `pending.jsonl` (across all statuses) matches the
@@ -242,8 +247,7 @@ pub fn find_proposal_in(dir: &Path, id: &str) -> Result<Option<PendingUpdate>> {
             Err(_) => continue,
         };
         // Same prefix-match rule as resolve_in (>= 4 chars).
-        let matches = p.id == id || (id.len() >= 4 && p.id.starts_with(id));
-        if matches {
+        if id_matches(id, &p.id) {
             found = Some(p);
         }
     }
@@ -285,16 +289,7 @@ fn resolve_in(
         };
         // ponytail: accept full id or any unique prefix (>= 4 chars)
         // so users can paste the 8-char short form from list-pending.
-        let matches = if p.id == id {
-            true
-        } else if id.len() >= 4 && p.id.starts_with(id) {
-            // Only treat as prefix match if unique across all entries.
-            // For now accept it — the loop continues even after match,
-            // and we re-validate uniqueness below.
-            true
-        } else {
-            false
-        };
+        let matches = id_matches(id, &p.id);
         if matches && p.status == ProposalStatus::Pending {
             p.status = new_status;
             p.resolved_at = Some(now);
