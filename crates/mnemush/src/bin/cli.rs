@@ -377,6 +377,16 @@ enum SyncCmd {
         #[arg(long, short = 'd')]
         dir: String,
     },
+    /// Push the current DB snapshot to a WebDAV endpoint
+    /// (default: 坚果云). Credentials via MNEMUSH_WEBDAV_USER /
+    /// MNEMUSH_WEBDAV_PASS env vars.
+    WebdavPush {
+        /// 自动触发时的 dirty 时间戳: push 成功后仅当 dirty 未被刷新时清除。
+        #[arg(long)]
+        dirty_ts: Option<i64>,
+    },
+    /// Pull + merge a WebDAV snapshot into the local DB.
+    WebdavPull,
 }
 
 #[derive(Subcommand)]
@@ -439,9 +449,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::ImportTree { dir, project } => {
             let d = dir
                 .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| {
-                    mnemush::default_data_dir().join("neuropils")
-                });
+                .unwrap_or_else(|| mnemush::default_data_dir().join("neuropils"));
             std::fs::create_dir_all(&d)?;
             let api = MemoryApi::new(&store, &config);
             let proj = project
@@ -519,7 +527,10 @@ fn main() -> anyhow::Result<()> {
             match format.as_deref() {
                 Some("json") => {
                     let n = list.len();
-                    println!("{}", serde_json::json!({"concepts": list, "count": n}).to_string())
+                    println!(
+                        "{}",
+                        serde_json::json!({"concepts": list, "count": n}).to_string()
+                    )
                 }
                 _ => {
                     for c in &list {
@@ -557,7 +568,7 @@ fn main() -> anyhow::Result<()> {
                     &h.memory.id[..8]
                 );
                 if !h.memory.content.is_empty() {
-                    println!("       {}", truncate(&h.memory.content, 80));
+                    println!("       {}", mnemush::truncate(&h.memory.content.replace('\n', " "), 80));
                 }
             }
         }
@@ -590,7 +601,10 @@ fn main() -> anyhow::Result<()> {
             }
             if let Ok(rep) = mnemush::capacity::enforce_capacity(&api) {
                 if rep.evicted_wiki + rep.evicted_low > 0 {
-                    println!("容量驱逐: 已清 wiki 索引 {} 条, 低分记忆 {} 条 (库 {:.0}/{:.0} MB)", rep.evicted_wiki, rep.evicted_low, rep.db_mb, rep.limit_mb);
+                    println!(
+                        "容量驱逐: 已清 wiki 索引 {} 条, 低分记忆 {} 条 (库 {:.0}/{:.0} MB)",
+                        rep.evicted_wiki, rep.evicted_low, rep.db_mb, rep.limit_mb
+                    );
                 }
             }
         }
@@ -747,7 +761,8 @@ fn main() -> anyhow::Result<()> {
             println!("  capacity:    {size:.0}/{limit:.0} MB (neuropil 入口 {np_count})");
         }
         Cmd::EdgeDecay => {
-            let updated = mnemush::forget::decay_all_edges(&mut store, &config, chrono::Utc::now())?;
+            let updated =
+                mnemush::forget::decay_all_edges(&mut store, &config, chrono::Utc::now())?;
             println!("edges decayed: {updated}");
         }
         Cmd::ProcessNeedsReview { grace_days } => {
@@ -862,7 +877,7 @@ fn main() -> anyhow::Result<()> {
                     m.title,
                 );
                 if !m.content.is_empty() {
-                    println!("       {}", truncate(&m.content, 80));
+                    println!("       {}", mnemush::truncate(&m.content.replace('\n', " "), 80));
                 }
             }
         }
@@ -887,8 +902,8 @@ fn main() -> anyhow::Result<()> {
                     for entry in std::fs::read_dir(&eval_dir)
                         .map_err(|e| mnemush::error::MnemushError::Other(e.to_string()))?
                     {
-                        let entry =
-                            entry.map_err(|e| mnemush::error::MnemushError::Other(e.to_string()))?;
+                        let entry = entry
+                            .map_err(|e| mnemush::error::MnemushError::Other(e.to_string()))?;
                         let path = entry.path();
                         if path.extension().and_then(|s| s.to_str()) != Some("ndjson") {
                             continue;
@@ -972,8 +987,8 @@ fn main() -> anyhow::Result<()> {
                     for entry in std::fs::read_dir(&eval_dir)
                         .map_err(|e| mnemush::error::MnemushError::Other(e.to_string()))?
                     {
-                        let entry =
-                            entry.map_err(|e| mnemush::error::MnemushError::Other(e.to_string()))?;
+                        let entry = entry
+                            .map_err(|e| mnemush::error::MnemushError::Other(e.to_string()))?;
                         let path = entry.path();
                         if path.extension().and_then(|s| s.to_str()) != Some("ndjson") {
                             continue;
@@ -1108,7 +1123,10 @@ fn main() -> anyhow::Result<()> {
                     match output {
                         Some(path) => {
                             std::fs::write(&path, &body).map_err(|e| {
-                                mnemush::error::MnemushError::Other(format!("write {}: {}", path, e))
+                                mnemush::error::MnemushError::Other(format!(
+                                    "write {}: {}",
+                                    path, e
+                                ))
                             })?;
                             println!("wrote {} ({} bytes)", path, body.len());
                         }
@@ -1187,6 +1205,30 @@ fn main() -> anyhow::Result<()> {
                         }
                         println!("resolve manually (e.g. delete local copy and re-import).");
                     }
+                }
+                SyncCmd::WebdavPush { dirty_ts } => {
+                    mnemush::webdav::push(&store, &mnemush::default_data_dir())?;
+                    // 自动触发: push 成功后清除未被刷新的 dirty(守卫防丢同步)。
+                    if let Some(ts) = dirty_ts {
+                        let d = mnemush::default_data_dir();
+                        let dirty = d.join("sync-dirty");
+                        if std::fs::read_to_string(&dirty)
+                            .map(|c| c.trim() == ts.to_string())
+                            .unwrap_or(false)
+                        {
+                            let _ = std::fs::remove_file(&dirty);
+                        }
+                    }
+                    println!("webdav push ok");
+                }
+                SyncCmd::WebdavPull => {
+                    let r = mnemush::webdav::pull(&store, &mnemush::default_data_dir())?;
+                    println!(
+                        "imported {} memories, {} conflicts, {} edges skipped",
+                        r.imported,
+                        r.conflicts.len(),
+                        r.skipped_edges
+                    );
                 }
             }
         }
@@ -1405,11 +1447,6 @@ fn count_by(store: &Store, col: &str) -> anyhow::Result<Vec<(String, i64)>> {
         out.push(r?);
     }
     Ok(out)
-}
-
-fn truncate(s: &str, n: usize) -> String {
-    // 展示用: 换行拍平成单行, 再走共享截断逻辑。
-    mnemush::truncate(&s.replace('\n', " "), n)
 }
 
 fn run_prune(

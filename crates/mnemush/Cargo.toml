@@ -1,6 +1,6 @@
 [package]
 name = "mnemush"
-version = "1.5.0"
+version = "1.6.0"
 edition = "2021"
 authors = ["Yunoinsky Chen"]
 rust-version = "1.75"
@@ -46,6 +46,9 @@ fastembed = "5"
 
 # MiniMax embedding API backend (embo-01, 1536d) — opt-in via model id
 ureq = { version = "2.12", features = ["json"] }
+
+# WebDAV basic auth (standard library has no base64)
+base64 = "0.22"
 
 # Text processing
 regex = "1"

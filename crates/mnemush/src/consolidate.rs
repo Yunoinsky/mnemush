@@ -55,7 +55,12 @@ pub fn parse_actions(raw: &str) -> Result<Vec<Action>> {
     if let Some(arr) = v.get("actions").and_then(|a| a.as_array()) {
         for item in arr {
             let t = item.get("type").and_then(|x| x.as_str()).unwrap_or("");
-            let s = |k: &str| item.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let s = |k: &str| {
+                item.get(k)
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            };
             match t {
                 "update" => out.push(Action::Update {
                     id: s("id"),
@@ -64,20 +69,30 @@ pub fn parse_actions(raw: &str) -> Result<Vec<Action>> {
                 }),
                 "link" => {
                     let source = s("source");
-                    let source = if source.is_empty() { s("source_id") } else { source };
+                    let source = if source.is_empty() {
+                        s("source_id")
+                    } else {
+                        source
+                    };
                     let source = if source.is_empty() { s("id") } else { source };
                     let target = s("target");
-                    let target = if target.is_empty() { s("target_id") } else { target };
+                    let target = if target.is_empty() {
+                        s("target_id")
+                    } else {
+                        target
+                    };
                     let etype = s("etype");
-                    let etype = if etype.is_empty() { s("relation") } else { etype };
+                    let etype = if etype.is_empty() {
+                        s("relation")
+                    } else {
+                        etype
+                    };
                     out.push(Action::Link {
                         source,
                         target,
                         etype,
-                        strength: item
-                            .get("strength")
-                            .and_then(|x| x.as_f64())
-                            .unwrap_or(0.6) as f32,
+                        strength: item.get("strength").and_then(|x| x.as_f64()).unwrap_or(0.6)
+                            as f32,
                     });
                 }
                 "merge" => {
@@ -85,9 +100,15 @@ pub fn parse_actions(raw: &str) -> Result<Vec<Action>> {
                     let keep = if keep.is_empty() { s("id") } else { keep };
                     let absorb = s("absorb");
                     let absorb = if absorb.is_empty() {
-                        item.get("sources").and_then(|x| x.as_array())
-                            .and_then(|a| a.first()).and_then(|x| x.as_str()).unwrap_or("").to_string()
-                    } else { absorb };
+                        item.get("sources")
+                            .and_then(|x| x.as_array())
+                            .and_then(|a| a.first())
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .to_string()
+                    } else {
+                        absorb
+                    };
                     out.push(Action::Merge { keep, absorb });
                 }
                 "insight" => out.push(Action::Insight {
@@ -105,10 +126,7 @@ pub fn parse_actions(raw: &str) -> Result<Vec<Action>> {
                 }),
                 "decay" => out.push(Action::Decay {
                     id: s("id"),
-                    factor: item
-                        .get("factor")
-                        .and_then(|x| x.as_f64())
-                        .unwrap_or(0.5) as f32,
+                    factor: item.get("factor").and_then(|x| x.as_f64()).unwrap_or(0.5) as f32,
                     reason: s("reason"),
                 }),
                 "forget" | "delete" | "remove" => out.push(Action::Forget {
@@ -161,7 +179,9 @@ fn resolve_id(api: &MemoryApi, short: &str) -> Option<String> {
         .prepare("SELECT id FROM memory WHERE id LIKE ?1 AND deleted_at IS NULL")
         .ok()?;
     let mut rows = stmt
-        .query_map(rusqlite::params![format!("{short}%")], |r| r.get::<_, String>(0))
+        .query_map(rusqlite::params![format!("{short}%")], |r| {
+            r.get::<_, String>(0)
+        })
         .ok()?;
     let mut ids: Vec<String> = rows.filter_map(|r| r.ok()).collect();
     if ids.len() == 1 {
@@ -229,7 +249,9 @@ fn run_one(api: &MemoryApi, action: &Action, stats: &mut ExecStats) -> Result<()
             content,
             reason,
         } => {
-            let Some(full) = resolve_id(api, id) else { return Ok(()); };
+            let Some(full) = resolve_id(api, id) else {
+                return Ok(());
+            };
             if let Some(mut m) = api.get(&full)? {
                 m.content = content.clone();
                 m.content_hash = MemoryApi::content_hash(content);
@@ -313,12 +335,10 @@ fn run_one(api: &MemoryApi, action: &Action, stats: &mut ExecStats) -> Result<()
             }
             stats.insights += 1;
         }
-        Action::Decay {
-            id,
-            factor,
-            reason,
-        } => {
-            let Some(full) = resolve_id(api, id) else { return Ok(()); };
+        Action::Decay { id, factor, reason } => {
+            let Some(full) = resolve_id(api, id) else {
+                return Ok(());
+            };
             if let Some(mut m) = api.get(&full)? {
                 if is_protected(&m) {
                     return Ok(());
@@ -336,7 +356,9 @@ fn run_one(api: &MemoryApi, action: &Action, stats: &mut ExecStats) -> Result<()
             }
         }
         Action::Forget { id, reason } => {
-            let Some(full) = resolve_id(api, id) else { return Ok(()); };
+            let Some(full) = resolve_id(api, id) else {
+                return Ok(());
+            };
             if let Some(m) = api.get(&full)? {
                 if is_protected(&m) {
                     return Ok(());
@@ -373,7 +395,9 @@ fn run_one(api: &MemoryApi, action: &Action, stats: &mut ExecStats) -> Result<()
             }
         }
         Action::Neuropilize { id, path } => {
-            let Some(full) = resolve_id(api, id) else { return Ok(()); };
+            let Some(full) = resolve_id(api, id) else {
+                return Ok(());
+            };
             if let Some(m) = api.get(&full)? {
                 // 与 Decay/Forget 同规则: importance≥0.7 / never_prune / identity / 7 天内新建
                 if is_protected(&m) {
@@ -500,10 +524,7 @@ pub fn save_state(api: &MemoryApi, s: &CState) -> Result<()> {
     if let Some(parent) = p.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(
-        p,
-        serde_json::json!({ "last_ts": s.last_ts }).to_string(),
-    )?;
+    std::fs::write(p, serde_json::json!({ "last_ts": s.last_ts }).to_string())?;
     Ok(())
 }
 
@@ -697,9 +718,10 @@ pub fn run_consolidate(api: &MemoryApi, opts: &RunOpts) -> Result<(ExecStats, us
     // 存档原始响应 + 用量(可追溯/成本核算)
     let _ = std::fs::create_dir_all(crate::default_data_dir().join("eval"));
     let _ = std::fs::write(
-        crate::default_data_dir()
-            .join("eval")
-            .join(format!("consolidate-{}.json", chrono::Utc::now().timestamp())),
+        crate::default_data_dir().join("eval").join(format!(
+            "consolidate-{}.json",
+            chrono::Utc::now().timestamp()
+        )),
         serde_json::json!({
             "actions": raw,
             "usage": {
@@ -782,8 +804,12 @@ mod tests {
         let id = api.add(nm).unwrap().id;
         // 拨到 30 天前, 绕过 is_protected 的"7 天内新建"豁免
         let old = crate::store::Store::now_ts() - 30 * 86400;
-        api.store.conn
-            .execute("UPDATE memory SET created_at = ?1 WHERE id = ?2", rusqlite::params![old, id])
+        api.store
+            .conn
+            .execute(
+                "UPDATE memory SET created_at = ?1 WHERE id = ?2",
+                rusqlite::params![old, id],
+            )
             .unwrap();
         id
     }
@@ -906,8 +932,12 @@ mod tests {
         // B 策略: trace 可被未来 dream 再遗忘。模拟未来轮次(拨旧,
         // 绕过"7 天内新建"保护 —— 保护新记忆是正确行为, 不是豁免)。
         let old = crate::store::Store::now_ts() - 30 * 86400;
-        api.store.conn
-            .execute("UPDATE memory SET created_at = ?1 WHERE id = ?2", rusqlite::params![old, tid])
+        api.store
+            .conn
+            .execute(
+                "UPDATE memory SET created_at = ?1 WHERE id = ?2",
+                rusqlite::params![old, tid],
+            )
             .unwrap();
         let s = execute(
             &api,
@@ -917,7 +947,11 @@ mod tests {
             }],
         )
         .unwrap();
-        assert_eq!(s.forgot, 1, "trace can be forgotten later, errors: {:?}", s.errors);
+        assert_eq!(
+            s.forgot, 1,
+            "trace can be forgotten later, errors: {:?}",
+            s.errors
+        );
         let traces2: Vec<Memory> = api
             .list_in_project(100, None)
             .unwrap()
@@ -938,12 +972,19 @@ mod tests {
         let mut nm = NewMemory::note("old memory", "old");
         nm.importance = 0.3;
         let id = api.add(nm).unwrap().id;
-        api.store.conn
-            .execute("UPDATE memory SET created_at = ?1 WHERE id = ?2", rusqlite::params![old, id])
+        api.store
+            .conn
+            .execute(
+                "UPDATE memory SET created_at = ?1 WHERE id = ?2",
+                rusqlite::params![old, id],
+            )
             .unwrap();
         // 全量扫描 → 应收集到 30 天前的记忆
         let cands = collect_candidates(&api, None, None).unwrap();
-        assert!(cands.iter().any(|m| m.id == id), "full scan sees old memory");
+        assert!(
+            cands.iter().any(|m| m.id == id),
+            "full scan sees old memory"
+        );
     }
 
     #[test]
@@ -961,7 +1002,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(s.merged, 1);
-        assert!(api.get(&absorb).unwrap().is_none(), "absorbed is soft-deleted");
+        assert!(
+            api.get(&absorb).unwrap().is_none(),
+            "absorbed is soft-deleted"
+        );
         let k = api.get(&keep).unwrap().unwrap();
         assert!(k.content.contains("content of absorbme"), "content merged");
     }
@@ -1012,7 +1056,10 @@ mod tests {
         let a = add(&api, "alpha", 0.3);
         let b = add(&api, "beta", 0.3); // 同毫秒 → 同前缀
         assert_eq!(&a[..8], &b[..8], "test requires same-prefix ids");
-        assert!(resolve_id(&api, &a[..8]).is_none(), "collision → None, not a guess");
+        assert!(
+            resolve_id(&api, &a[..8]).is_none(),
+            "collision → None, not a guess"
+        );
     }
 
     #[test]
@@ -1071,7 +1118,10 @@ mod tests {
         .unwrap();
         assert_eq!(s.neuropilized, 0, "important memory not archived");
         let m = api.get(&id).unwrap().unwrap();
-        assert!(m.content.contains("content of protected"), "content untouched");
+        assert!(
+            m.content.contains("content of protected"),
+            "content untouched"
+        );
         assert!(!m.context.as_deref().unwrap_or("").starts_with("neuropil:"));
     }
 
@@ -1085,8 +1135,12 @@ mod tests {
         nm.memory_type = MemoryType::Identity;
         let id = api.add(nm).unwrap().id;
         let old = crate::store::Store::now_ts() - 30 * 86400;
-        api.store.conn
-            .execute("UPDATE memory SET created_at = ?1 WHERE id = ?2", rusqlite::params![old, id])
+        api.store
+            .conn
+            .execute(
+                "UPDATE memory SET created_at = ?1 WHERE id = ?2",
+                rusqlite::params![old, id],
+            )
             .unwrap();
         let s = execute(
             &api,
@@ -1097,7 +1151,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(s.neuropilized, 0, "identity memory not archived");
-        assert!(!api.get(&id).unwrap().unwrap().context.as_deref().unwrap_or("").starts_with("neuropil:"));
+        assert!(!api
+            .get(&id)
+            .unwrap()
+            .unwrap()
+            .context
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("neuropil:"));
     }
 
     #[test]
@@ -1110,8 +1171,12 @@ mod tests {
         nm.importance = 0.3;
         let id = api.add(nm).unwrap().id;
         let old = crate::store::Store::now_ts() - 30 * 86400;
-        api.store.conn
-            .execute("UPDATE memory SET created_at = ?1 WHERE id = ?2", rusqlite::params![old, id])
+        api.store
+            .conn
+            .execute(
+                "UPDATE memory SET created_at = ?1 WHERE id = ?2",
+                rusqlite::params![old, id],
+            )
             .unwrap();
         let s = execute(
             &api,
@@ -1122,7 +1187,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(s.neuropilized, 0, "decision memory not archived");
-        assert!(!api.get(&id).unwrap().unwrap().context.as_deref().unwrap_or("").starts_with("neuropil:"));
+        assert!(!api
+            .get(&id)
+            .unwrap()
+            .unwrap()
+            .context
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("neuropil:"));
     }
 
     #[test]
@@ -1139,7 +1211,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(s.neuropilized, 0, "empty path not archived");
-        assert!(!api.get(&id).unwrap().unwrap().context.as_deref().unwrap_or("").starts_with("neuropil:"));
+        assert!(!api
+            .get(&id)
+            .unwrap()
+            .unwrap()
+            .context
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("neuropil:"));
     }
 
     /// MNEMUSH_DATA_DIR 隔离: run_one 的 neuropilize 落盘写 default_data_dir()/neuropils,
@@ -1235,10 +1314,12 @@ mod tests {
             assert_eq!(s.neuropilized, 1, "degrade still happens");
             assert_eq!(s.errors.len(), 1, "export failure recorded");
             assert!(!data_dir.join("evil.md").exists(), "no file outside tree");
-            assert!(!data_dir.join("neuropils").join("evil.md").exists(), "nothing written");
+            assert!(
+                !data_dir.join("neuropils").join("evil.md").exists(),
+                "nothing written"
+            );
         });
     }
-
 
     #[test]
     fn dream_sampling_empty_and_small_library() {
@@ -1263,8 +1344,12 @@ mod tests {
         let base = crate::store::Store::now_ts() - 40 * 86400;
         for i in 0..40 {
             let id = add(&api, &format!("mem{i:02}"), 0.3);
-            api.store.conn
-                .execute("UPDATE memory SET created_at = ?1 WHERE id = ?2", rusqlite::params![base + i as i64, id])
+            api.store
+                .conn
+                .execute(
+                    "UPDATE memory SET created_at = ?1 WHERE id = ?2",
+                    rusqlite::params![base + i as i64, id],
+                )
                 .unwrap();
         }
         let c = collect_dream_candidates(&api, 3).unwrap();

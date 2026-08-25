@@ -155,6 +155,10 @@ impl<'a> MemoryApi<'a> {
             .log_event_tx(&tx, "memory_add", Some(&memory.id), None, None, "agent")?;
         tx.commit()?;
 
+        // WebDAV 自动同步(dirty + 去抖 + 异步 push; 默认关闭)。失败静默,
+        // 不阻塞写入路径 —— 同步只是尽力而为, 下次写入会再触发。
+        let _ = crate::webdav::maybe_auto_push(self.store, self.config, &crate::default_data_dir());
+
         Ok(AddResult {
             id: memory.id,
             conflicts,
@@ -250,10 +254,7 @@ impl<'a> MemoryApi<'a> {
         if self.config.edges.auto_merge_enabled
             && matches!(
                 new_mem.category,
-                Category::Note
-                    | Category::Skill
-                    | Category::Insight
-                    | Category::Episodic
+                Category::Note | Category::Skill | Category::Insight | Category::Episodic
             )
         {
             let min_sim = self.config.edges.auto_merge_min_sim;
@@ -298,11 +299,7 @@ impl<'a> MemoryApi<'a> {
                         "memory_auto_merge",
                         Some(&new_mem.id),
                         None,
-                        Some(&format!(
-                            "merged {} (jaccard={:.2})",
-                            &old.id[..8],
-                            sim
-                        )),
+                        Some(&format!("merged {} (jaccard={:.2})", &old.id[..8], sim)),
                         "agent",
                     )?;
                 }
@@ -440,6 +437,8 @@ impl<'a> MemoryApi<'a> {
         self.store
             .log_event_tx(&tx, "memory_update", Some(&m.id), None, None, "agent")?;
         tx.commit()?;
+        // WebDAV 自动同步(dirty + 去抖 + 异步 push; 默认关闭)。失败静默。
+        let _ = crate::webdav::maybe_auto_push(self.store, self.config, &crate::default_data_dir());
         Ok(())
     }
 
@@ -460,6 +459,8 @@ impl<'a> MemoryApi<'a> {
         self.store
             .log_event_tx(&tx, "memory_soft_delete", Some(id), None, None, "agent")?;
         tx.commit()?;
+        // WebDAV 自动同步(dirty + 去抖 + 异步 push; 默认关闭)。失败静默。
+        let _ = crate::webdav::maybe_auto_push(self.store, self.config, &crate::default_data_dir());
         Ok(())
     }
 
@@ -640,9 +641,8 @@ impl<'a> MemoryApi<'a> {
                     }
                     // Merge vector-only top-K into the candidate set.
                     let mut scored: Vec<(String, f32)> = cos_by_id.clone().into_iter().collect();
-                    scored.sort_by(|a, b| {
-                        b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-                    });
+                    scored
+                        .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                     let existing: std::collections::HashSet<String> =
                         hits.iter().map(|h| h.memory.id.clone()).collect();
                     for (mid, _cos) in scored.into_iter().take((limit * 2).max(5) as usize) {
@@ -801,7 +801,10 @@ fn fts_match(
            ORDER BY rank
            LIMIT ?3"#,
     )?;
-    let rows = stmt.query_map(params![query, exclude_id, limit as i64], Store::row_to_memory)?;
+    let rows = stmt.query_map(
+        params![query, exclude_id, limit as i64],
+        Store::row_to_memory,
+    )?;
     let mut out = Vec::new();
     for r in rows {
         out.push(r?);
@@ -936,10 +939,7 @@ mod tests {
     fn search_hit_records_access() {
         let (store, cfg) = setup();
         let api = MemoryApi::new(&store, &cfg);
-        let id = api
-            .add(note("needle", "needle content here"))
-            .unwrap()
-            .id;
+        let id = api.add(note("needle", "needle content here")).unwrap().id;
         let before = api.get(&id).unwrap().unwrap().last_accessed_at;
         let hits = api
             .search(
@@ -1720,7 +1720,10 @@ mod action_business_logic_tests {
 
         // Store hand-made embeddings: m1 ~ [1,0,0], m2 ~ [0,1,0].
         let model = cfg.embedding.model.clone();
-        for (id, vec) in [(&m1.id, vec![1.0f32, 0.0, 0.0]), (&m2.id, vec![0.0, 1.0, 0.0])] {
+        for (id, vec) in [
+            (&m1.id, vec![1.0f32, 0.0, 0.0]),
+            (&m2.id, vec![0.0, 1.0, 0.0]),
+        ] {
             let tx = store.conn.unchecked_transaction().unwrap();
             put_embedding_tx(&tx, id, &model, vec.len() as i64, &vec).unwrap();
             tx.commit().unwrap();
@@ -1739,7 +1742,6 @@ mod action_business_logic_tests {
         assert!(!hits.is_empty(), "semantic recall should return something");
     }
 
-
     /// v1.0 auto-merge: adding a near-identical note soft-deletes the
     /// old one and retargets its edges to the new one.
     #[test]
@@ -1756,7 +1758,10 @@ mod action_business_logic_tests {
         assert_ne!(id1, id2, "exact hash differs, so no dedup");
         // The old one should be soft-deleted (merged into the new).
         let old = api.get(&id1).unwrap();
-        assert!(old.is_none(), "old memory should be soft-deleted after merge");
+        assert!(
+            old.is_none(),
+            "old memory should be soft-deleted after merge"
+        );
         let new = api.get(&id2).unwrap().expect("new memory exists");
         assert_eq!(new.status, ActionStatus::Active);
         // Both active? No — only the new one is active.
@@ -1800,12 +1805,24 @@ mod action_business_logic_tests {
         let (store, cfg) = store();
         let api = MemoryApi::new(&store, &cfg);
         // A related memory that will get linked to both.
-        let hub = api.add(make_mem("hub memory unrelated topic", "hub")).unwrap().id;
+        let hub = api
+            .add(make_mem("hub memory unrelated topic", "hub"))
+            .unwrap()
+            .id;
         // First note; link it to hub manually.
         let content = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega";
         let id1 = api.add(make_mem(content, "doc1")).unwrap().id;
         let edge_api = crate::edge::EdgeApi::new(&store, &cfg);
-        edge_api.link(&id1, &hub, crate::schema::EdgeType::Related, 0.8, None, None).unwrap();
+        edge_api
+            .link(
+                &id1,
+                &hub,
+                crate::schema::EdgeType::Related,
+                0.8,
+                None,
+                None,
+            )
+            .unwrap();
         // Second near-identical note.
         let content2 = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega!";
         let id2 = api.add(make_mem(content2, "doc2")).unwrap().id;
@@ -1818,5 +1835,4 @@ mod action_business_logic_tests {
             "edge from merged doc1 should be retargeted to doc2"
         );
     }
-
 }

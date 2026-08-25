@@ -133,3 +133,19 @@ cold_days = 30              # neuropil cold: no hits for N days + file unchanged
 entry_summary_chars = 300   # summary entries truncate content to N chars
 eviction_batch = 100        # eviction processes N entries per batch
 dream_sample_m = 3           # dream 采样: 每种子点随机取 ≤m 邻居, 延伸 2 级(≤10·m² 条/轮)
+
+# ── WebDAV cross-device sync (v1.6) ────────────────────────────────────
+# Off by default. Automatic sync triggers only when webdav_enabled = true
+# AND credentials are in the environment:
+#   export MNEMUSH_WEBDAV_USER=you@example.com
+#   export MNEMUSH_WEBDAV_PASS=<app password>      # 坚果云: 设置→安全选项→应用密码
+# Target URL override (optional): MNEMUSH_WEBDAV_URL
+# (default: https://dav.jianguoyun.com/dav/mnemush/)
+# With sync on, every memory add/update/soft-delete writes a dirty marker;
+# a background push fires once the last write is older than
+# webdav_debounce_secs (consecutive writes merge into one push).
+# Manual transport always works when credentials are set:
+# `mnemush sync webdav-push` / `mnemush sync webdav-pull`.
+[sync]
+webdav_enabled = false        # master switch for automatic sync
+webdav_debounce_secs = 30     # debounce window (s): merges burst writes into one push

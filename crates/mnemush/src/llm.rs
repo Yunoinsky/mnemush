@@ -45,7 +45,11 @@ pub fn deepseek_model() -> String {
 
 fn minimax_key() -> Option<String> {
     // 官方 cn 环境变量名(MINIMAX_CN_API_KEY / MINIMAX_TOKEN_PLAN_KEY)
-    for v in ["MINIMAX_API_KEY", "MINIMAX_CN_API_KEY", "MINIMAX_TOKEN_PLAN_KEY"] {
+    for v in [
+        "MINIMAX_API_KEY",
+        "MINIMAX_CN_API_KEY",
+        "MINIMAX_TOKEN_PLAN_KEY",
+    ] {
         if let Ok(k) = std::env::var(v) {
             return Some(k);
         }
@@ -107,7 +111,11 @@ pub fn parse_usage(body: &str) -> LlmUsage {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(body) else {
         return LlmUsage::default();
     };
-    let g = |k: &str| v.pointer(&format!("/usage/{k}")).and_then(|x| x.as_u64()).unwrap_or(0);
+    let g = |k: &str| {
+        v.pointer(&format!("/usage/{k}"))
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0)
+    };
     let c = |k: &str| {
         v.pointer("/usage/completion_tokens_details")
             .and_then(|d| d.get(k))
@@ -169,10 +177,8 @@ mod tests {
 
     #[test]
     fn parses_openai_style_response() {
-        let out = parse_chat_response(
-            r#"{"choices":[{"message":{"content":"hello from mock"}}]}"#,
-        )
-        .unwrap();
+        let out = parse_chat_response(r#"{"choices":[{"message":{"content":"hello from mock"}}]}"#)
+            .unwrap();
         assert_eq!(out, "hello from mock");
     }
 

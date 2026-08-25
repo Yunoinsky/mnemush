@@ -106,7 +106,11 @@ struct RemoteEmbedder {
 /// MiniMax API key: env(MINIMAX_API_KEY / MINIMAX_CN_API_KEY /
 /// MINIMAX_TOKEN_PLAN_KEY)→ ~/.mmx/config.json api_key 兜底。
 fn minimax_key() -> Option<String> {
-    for v in ["MINIMAX_API_KEY", "MINIMAX_CN_API_KEY", "MINIMAX_TOKEN_PLAN_KEY"] {
+    for v in [
+        "MINIMAX_API_KEY",
+        "MINIMAX_CN_API_KEY",
+        "MINIMAX_TOKEN_PLAN_KEY",
+    ] {
         if let Ok(k) = std::env::var(v) {
             return Some(k);
         }

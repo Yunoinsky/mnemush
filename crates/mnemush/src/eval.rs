@@ -66,8 +66,9 @@ pub fn prune_apply(cfg: &EvalConfig) -> Result<PruneReport> {
     let dir = eval_dir();
     if !dir.exists() {
         // Create the dir so subsequent writes don't fail. Cheap.
-        fs::create_dir_all(&dir)
-            .map_err(|e| MnemushError::Other(format!("create eval dir {}: {}", dir.display(), e)))?;
+        fs::create_dir_all(&dir).map_err(|e| {
+            MnemushError::Other(format!("create eval dir {}: {}", dir.display(), e))
+        })?;
         return Ok(PruneReport::default());
     }
     prune_inner(&dir, cfg, /*apply=*/ true)
@@ -111,8 +112,9 @@ fn prune_inner(dir: &Path, cfg: &EvalConfig, apply: bool) -> Result<PruneReport>
     for (path, mtime) in files {
         if cfg.max_age_days > 0 && (now - mtime) > age_cutoff_secs {
             if apply {
-                fs::remove_file(&path)
-                    .map_err(|e| MnemushError::Other(format!("remove {}: {}", path.display(), e)))?;
+                fs::remove_file(&path).map_err(|e| {
+                    MnemushError::Other(format!("remove {}: {}", path.display(), e))
+                })?;
             }
             report.files_removed_age += 1;
         } else {
@@ -146,8 +148,9 @@ fn prune_inner(dir: &Path, cfg: &EvalConfig, apply: bool) -> Result<PruneReport>
             report.bytes_recovered_estimated += (drop_n * avg) as u64;
             if apply {
                 let kept: Vec<&str> = non_empty.iter().skip(drop_n).copied().collect();
-                let mut f = fs::File::create(path)
-                    .map_err(|e| MnemushError::Other(format!("rewrite {}: {}", path.display(), e)))?;
+                let mut f = fs::File::create(path).map_err(|e| {
+                    MnemushError::Other(format!("rewrite {}: {}", path.display(), e))
+                })?;
                 for line in kept {
                     writeln!(f, "{}", line).map_err(|e| {
                         MnemushError::Other(format!("write {}: {}", path.display(), e))
@@ -171,8 +174,9 @@ fn prune_inner(dir: &Path, cfg: &EvalConfig, apply: bool) -> Result<PruneReport>
     if survivors.len() > cfg.max_session_files {
         for (path, _) in survivors.iter().skip(cfg.max_session_files) {
             if apply {
-                fs::remove_file(path)
-                    .map_err(|e| MnemushError::Other(format!("remove {}: {}", path.display(), e)))?;
+                fs::remove_file(path).map_err(|e| {
+                    MnemushError::Other(format!("remove {}: {}", path.display(), e))
+                })?;
             }
             report.files_removed_count += 1;
             if let Some(n) = file_lines.get(path) {
@@ -263,8 +267,12 @@ mod tests {
             .unwrap()
             .as_secs() as i64;
         // 5 sessions: 2 fresh, 2 old (age 100d), 1 fresh but too big.
-        write_session(&dir, "fresh1", 10, now);
-        write_session(&dir, "fresh2", 10, now);
+        // 各 fresh 文件使用不同的 mtime,打破 stable-sort 平局——Windows 上
+        // mtime 精度为秒且 read_dir 顺序受文件系统影响,同 mtime 下断言
+        // 不确定性(可能丢 huge 也可能丢 fresh)。实际逻辑不受影响,仅断言
+        // 顺序性需要 mtime 区分。
+        write_session(&dir, "fresh1", 10, now - 30);
+        write_session(&dir, "fresh2", 10, now - 20);
         write_session(&dir, "old1", 10, now - 100 * 86_400);
         write_session(&dir, "old2", 10, now - 100 * 86_400);
         write_session(&dir, "huge", 5_000, now);
@@ -274,7 +282,7 @@ mod tests {
             max_session_files: 2,
         };
         let r = prune_apply_with_dir(&dir, &cfg).unwrap();
-        // 2 old removed by age, 1 by count cap (after age-sort, fresh1+fresh2+huge → keep 2).
+        // 2 old removed by age, 1 by count cap (after age-sort, fresh2 + huge → keep 2, fresh1 dropped as oldest fresh).
         assert_eq!(r.files_removed_age, 2, "old1 + old2 should be aged out");
         assert_eq!(
             r.files_removed_count, 1,
@@ -282,7 +290,7 @@ mod tests {
         );
         // huge file trimmed from 5000 → 1000 lines.
         assert_eq!(r.lines_dropped_count, 4_000);
-        // After trim + count cap, 2 files survive with 10 + 1000 = 1010 lines.
+        // After trim + count cap, huge (trimmed to 1000) + fresh2 (10) survive.
         assert_eq!(r.lines_kept, 10 + 1000);
         // fresh1, fresh2 or huge should still exist; old1/old2 gone.
         assert!(!dir.join("old1.ndjson").exists());

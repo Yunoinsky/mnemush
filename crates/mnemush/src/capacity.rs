@@ -30,7 +30,9 @@ pub fn entry_summary(content: &str, max_chars: usize) -> String {
 /// 降级为摘要入口: 清全文与向量, 保留 title/摘要/路径(context=neuropil:path)/边。
 /// 摘要存入 content(仅截取), 需要全文时按 context 路径从文件树读。
 pub fn degrade_to_entry(api: &MemoryApi, id: &str, path: &str) -> Result<()> {
-    let Some(mut m) = api.get(id)? else { return Ok(()); };
+    let Some(mut m) = api.get(id)? else {
+        return Ok(());
+    };
     if m.content.is_empty() {
         m.context = Some(format!("neuropil:{path}"));
         api.update(&m)?;
@@ -144,7 +146,10 @@ pub fn evict_low_value(api: &MemoryApi, batch: usize) -> Result<usize> {
     let week_ago = crate::store::Store::now_ts() - 7 * 86400;
     let mut evicted = 0;
     for (_, m) in scored {
-        if m.importance >= 0.7 || m.never_prune || m.memory_type == crate::schema::MemoryType::Identity {
+        if m.importance >= 0.7
+            || m.never_prune
+            || m.memory_type == crate::schema::MemoryType::Identity
+        {
             continue; // 保护规则
         }
         if m.created_at.timestamp() > week_ago {
@@ -164,7 +169,9 @@ pub fn evict_low_value(api: &MemoryApi, batch: usize) -> Result<usize> {
 /// 估算, 估算不超限时物理仍可能稳定超限, 所以驱逐链的触发条件看物理大小;
 /// 驱逐后 VACUUM 回收死页, 物理必降。
 pub fn db_physical_mb(store: &Store) -> Result<f64> {
-    let pages: i64 = store.conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
+    let pages: i64 = store
+        .conn
+        .query_row("PRAGMA page_count", [], |r| r.get(0))?;
     let page_size: i64 = store.conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
     Ok(pages as f64 * page_size as f64 / 1e6)
 }
@@ -204,7 +211,10 @@ pub fn enforce_capacity(api: &MemoryApi) -> Result<CapacityReport> {
     // ——不收敛且卡热路径。物理整理留给 dream 或手动 prune。
     // 注意 VACUUM 不能在事务内执行——此链内无活动事务, 可直接执行。
     if rep.evicted_wiki + rep.evicted_low > 0 {
-        let freelist: i64 = api.store.conn.query_row("PRAGMA freelist_count", [], |r| r.get(0))?;
+        let freelist: i64 = api
+            .store
+            .conn
+            .query_row("PRAGMA freelist_count", [], |r| r.get(0))?;
         if freelist > 0 {
             api.store.conn.execute_batch("VACUUM")?;
         }
@@ -221,12 +231,17 @@ pub fn is_cold(api: &MemoryApi, m: &crate::schema::Memory, neuropils_dir: &Path)
         return false; // 入口近期命中过
     }
     // 文件 mtime
-    let Some(path) = neuropil_path(m) else { return false };
+    let Some(path) = neuropil_path(m) else {
+        return false;
+    };
     let full = neuropils_dir.join(path);
     match std::fs::metadata(&full) {
         Ok(md) => {
             if let Ok(mt) = md.modified() {
-                let mt_ts = mt.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+                let mt_ts = mt
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
                 mt_ts <= cutoff
             } else {
                 false
@@ -244,22 +259,34 @@ fn neuropil_path(m: &crate::schema::Memory) -> Option<&str> {
 pub fn compress_neuropil(api: &MemoryApi, neuropils_dir: &Path) -> Result<CompressStats> {
     let mut stats = CompressStats::default();
     let all = api.list_in_project(100000, None)?;
-    let cold: Vec<crate::schema::Memory> = all.into_iter().filter(|m| is_cold(api, m, neuropils_dir)).collect();
+    let cold: Vec<crate::schema::Memory> = all
+        .into_iter()
+        .filter(|m| is_cold(api, m, neuropils_dir))
+        .collect();
     if cold.is_empty() {
         return Ok(stats);
     }
     let archive_dir = neuropils_dir.join("archive");
     std::fs::create_dir_all(&archive_dir)?;
     // 1) 合并归档页(每 project 一个归档 md)
-    let mut per_project: std::collections::BTreeMap<String, Vec<&crate::schema::Memory>> = Default::default();
+    let mut per_project: std::collections::BTreeMap<String, Vec<&crate::schema::Memory>> =
+        Default::default();
     for m in &cold {
         let p = m.project.clone().unwrap_or_else(|| "misc".into());
         per_project.entry(p).or_default().push(m);
     }
     for (proj, mems) in per_project {
-        let mut page = format!("---\ntitle: archived-{proj}\ncategory: note\n---\n\n# 归档 {proj}({} 条)\n\n", mems.len());
+        let mut page = format!(
+            "---\ntitle: archived-{proj}\ncategory: note\n---\n\n# 归档 {proj}({} 条)\n\n",
+            mems.len()
+        );
         for m in &mems {
-            page.push_str(&format!("## {}\n\n源: `{}`\n\n{}\n\n", m.title, neuropil_path(m).unwrap_or(""), m.content));
+            page.push_str(&format!(
+                "## {}\n\n源: `{}`\n\n{}\n\n",
+                m.title,
+                neuropil_path(m).unwrap_or(""),
+                m.content
+            ));
         }
         let fname = archive_dir.join(format!("{proj}.md"));
         std::fs::write(&fname, page)?;
@@ -452,9 +479,15 @@ mod tests {
         let n = evict_low_value(&api, 10).unwrap();
         assert!(n >= 1, "at least the low-value memory evicted");
         assert!(api.get(&low.id).unwrap().is_none(), "low-value gone");
-        assert!(api.get(&important.id).unwrap().is_some(), "high importance spared");
+        assert!(
+            api.get(&important.id).unwrap().is_some(),
+            "high importance spared"
+        );
         assert!(api.get(&np_id).unwrap().is_some(), "never_prune spared");
-        assert!(api.get(&fresh.id).unwrap().is_some(), "7 天内新建禁驱逐 (F4)");
+        assert!(
+            api.get(&fresh.id).unwrap().is_some(),
+            "7 天内新建禁驱逐 (F4)"
+        );
     }
 
     /// F3: 驱逐链①——物理超限 → 清 wiki 索引 → 估算清完即达标 → 低分不触发,
@@ -468,35 +501,45 @@ mod tests {
     fn enforce_capacity_triggers_on_physical_size() {
         let (store, mut cfg, dir) = test_store_file();
         cfg.capacity.max_db_mb = 9.0;
-        let api = MemoryApi::new(&store, &cfg);
-        // 空格分隔的重复词: 内容 ~10MB, 且 FTS 查询 token 不会超长/超量
-        let wiki = mk(&api, &"wombat ".repeat(1_500_000), "wiki idx", 0.1);
-        api.store
-            .conn
-            .execute("UPDATE memory SET project='external-wiki'", [])
-            .unwrap();
-        let agent = mk(&api, &"quark ".repeat(200), "agent keep", 0.1);
-        let physical_before = db_physical_mb(&store).unwrap();
-        assert!(
-            physical_before > 9.0,
-            "physical over limit triggers the chain: {physical_before} MB"
-        );
-        let rep = enforce_capacity(&api).unwrap();
-        assert!(rep.evicted_wiki >= 1, "wiki evicted: {rep:?}");
-        assert_eq!(rep.evicted_low, 0, "estimate converged after wiki clear: {rep:?}");
-        assert!(
-            api.get(&wiki.id).unwrap().is_none(),
-            "wiki memory soft-deleted"
-        );
-        assert!(
-            api.get(&agent.id).unwrap().is_some(),
-            "low-value agent memory spared (wiki clear already under limit)"
-        );
-        let physical_after = db_physical_mb(&store).unwrap();
-        assert!(
-            physical_after < physical_before,
-            "VACUUM reclaimed physical: {physical_before} -> {physical_after} MB"
-        );
+        // 把 store 移进一个 Scope,让所有引用(api.store) drop 后再清理目录。
+        // Windows 下打开的 SQLite 连接(含 WAL/SHM 句柄)会阻止目录删除——
+        // Unix 可以 unlink 打开的文件,Windows 不行。
+        let inner = || -> crate::error::Result<()> {
+            let api = MemoryApi::new(&store, &cfg);
+            let wiki = mk(&api, &"wombat ".repeat(1_500_000), "wiki idx", 0.1);
+            api.store
+                .conn
+                .execute("UPDATE memory SET project='external-wiki'", [])
+                .unwrap();
+            let agent = mk(&api, &"quark ".repeat(200), "agent keep", 0.1);
+            let physical_before = db_physical_mb(&store).unwrap();
+            assert!(
+                physical_before > 9.0,
+                "physical over limit triggers the chain: {physical_before} MB"
+            );
+            let rep = enforce_capacity(&api).unwrap();
+            assert!(rep.evicted_wiki >= 1, "wiki evicted: {rep:?}");
+            assert_eq!(
+                rep.evicted_low, 0,
+                "estimate converged after wiki clear: {rep:?}"
+            );
+            assert!(
+                api.get(&wiki.id).unwrap().is_none(),
+                "wiki memory soft-deleted"
+            );
+            assert!(
+                api.get(&agent.id).unwrap().is_some(),
+                "low-value agent memory spared (wiki clear already under limit)"
+            );
+            let physical_after = db_physical_mb(&store).unwrap();
+            assert!(
+                physical_after < physical_before,
+                "VACUUM reclaimed physical: {physical_before} -> {physical_after} MB"
+            );
+            Ok(())
+        };
+        inner().unwrap();
+        drop(store);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -513,7 +556,10 @@ mod tests {
         let rep = enforce_capacity(&api).unwrap();
         assert!(rep.evicted_low >= 1, "low value evicted: {rep:?}");
         assert!(api.get(&low.id).unwrap().is_none(), "low-value gone");
-        assert!(api.get(&keep.id).unwrap().is_some(), "high importance spared");
+        assert!(
+            api.get(&keep.id).unwrap().is_some(),
+            "high importance spared"
+        );
     }
 
     /// R2: 物理超限但无驱逐时不 VACUUM——死页堆叠造成的物理超限(估算已达标)
@@ -525,28 +571,34 @@ mod tests {
     fn enforce_capacity_skips_vacuum_without_eviction() {
         let (store, mut cfg, dir) = test_store_file();
         cfg.capacity.max_db_mb = 9.0;
-        let api = MemoryApi::new(&store, &cfg);
-        // 10MB 记忆: 软删后死页仍占物理, 但估算(活数据)不再计入
-        let big = mk(&api, &"badger ".repeat(1_500_000), "big dead", 0.1);
-        api.soft_delete(&big.id).unwrap();
-        let small = mk(&api, "numbat", "keep", 0.9);
-        let physical_before = db_physical_mb(&store).unwrap();
-        assert!(
-            physical_before > 9.0,
-            "dead pages keep physical over limit: {physical_before} MB"
-        );
-        let rep = enforce_capacity(&api).unwrap();
-        assert_eq!(rep.evicted_wiki, 0, "no wiki to clear: {rep:?}");
-        assert_eq!(
-            rep.evicted_low, 0,
-            "estimate under limit, no low-value eviction: {rep:?}"
-        );
-        let physical_after = db_physical_mb(&store).unwrap();
-        assert_eq!(
-            physical_after, physical_before,
-            "no eviction -> no VACUUM -> physical untouched: {physical_before} -> {physical_after} MB"
-        );
-        assert!(api.get(&small.id).unwrap().is_some(), "live memory intact");
+        // 同上: store 在闭包内使用,闭包返回前所有 api/conn 句柄释放,
+        // 然后 drop store 再 remove_dir_all——绕过 Windows 共享锁。
+        let inner = || -> crate::error::Result<()> {
+            let api = MemoryApi::new(&store, &cfg);
+            let big = mk(&api, &"badger ".repeat(1_500_000), "big dead", 0.1);
+            api.soft_delete(&big.id).unwrap();
+            let small = mk(&api, "numbat", "keep", 0.9);
+            let physical_before = db_physical_mb(&store).unwrap();
+            assert!(
+                physical_before > 9.0,
+                "dead pages keep physical over limit: {physical_before} MB"
+            );
+            let rep = enforce_capacity(&api).unwrap();
+            assert_eq!(rep.evicted_wiki, 0, "no wiki to clear: {rep:?}");
+            assert_eq!(
+                rep.evicted_low, 0,
+                "estimate under limit, no low-value eviction: {rep:?}"
+            );
+            let physical_after = db_physical_mb(&store).unwrap();
+            assert_eq!(
+                physical_after, physical_before,
+                "no eviction -> no VACUUM -> physical untouched: {physical_before} -> {physical_after} MB"
+            );
+            assert!(api.get(&small.id).unwrap().is_some(), "live memory intact");
+            Ok(())
+        };
+        inner().unwrap();
+        drop(store);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -562,12 +614,24 @@ mod tests {
     fn degrade_to_entry_clears_content_keeps_path() {
         let (store, cfg) = test_store();
         let api = MemoryApi::new(&store, &cfg);
-        let id = api.add(NewMemory::note("完整概念的第一句。第二句在这里。第三句是多余的长尾。", "概念")).unwrap().id;
+        let id = api
+            .add(NewMemory::note(
+                "完整概念的第一句。第二句在这里。第三句是多余的长尾。",
+                "概念",
+            ))
+            .unwrap()
+            .id;
         degrade_to_entry(&api, &id, "neuropils/concepts/概念.md").unwrap();
         let m = api.get(&id).unwrap().unwrap();
         // brief 原断言 is_empty 与 entry_summary 规则矛盾(无标点/短文摘要=全文): 摘要存入 content, 此处断言降级为前 2 句
-        assert_eq!(m.content, "完整概念的第一句。第二句在这里。", "full text replaced by 2-sentence summary");
-        assert_eq!(m.context.as_deref(), Some("neuropil:neuropils/concepts/概念.md"));
+        assert_eq!(
+            m.content, "完整概念的第一句。第二句在这里。",
+            "full text replaced by 2-sentence summary"
+        );
+        assert_eq!(
+            m.context.as_deref(),
+            Some("neuropil:neuropils/concepts/概念.md")
+        );
         assert!(m.title.contains("概念"), "title kept");
     }
 
@@ -585,10 +649,14 @@ mod tests {
         std::fs::write(&f, "x").unwrap();
         let old = std::time::SystemTime::now() - std::time::Duration::from_secs(40 * 86400);
         let fh = std::fs::OpenOptions::new().write(true).open(&f).unwrap();
-        fh.set_times(std::fs::FileTimes::new().set_modified(old)).unwrap();
+        fh.set_times(std::fs::FileTimes::new().set_modified(old))
+            .unwrap();
         drop(fh);
         let mut nm = NewMemory::note("cold content", "cold");
-        nm.context = Some(format!("neuropil:{}", f.file_name().unwrap().to_string_lossy()));
+        nm.context = Some(format!(
+            "neuropil:{}",
+            f.file_name().unwrap().to_string_lossy()
+        ));
         let id = api.add(nm).unwrap().id;
         api.store
             .conn
@@ -604,7 +672,8 @@ mod tests {
         assert!(!is_cold(&api, &mem, &tmp), "fresh file not cold");
         // 恢复旧 mtime, 改入口新鲜 → 不冷
         let fh = std::fs::OpenOptions::new().write(true).open(&f).unwrap();
-        fh.set_times(std::fs::FileTimes::new().set_modified(old)).unwrap();
+        fh.set_times(std::fs::FileTimes::new().set_modified(old))
+            .unwrap();
         drop(fh);
         api.store
             .conn
@@ -637,7 +706,8 @@ mod tests {
             let f = tmp.join(name);
             std::fs::write(&f, body).unwrap();
             let fh = std::fs::OpenOptions::new().write(true).open(&f).unwrap();
-            fh.set_times(std::fs::FileTimes::new().set_modified(old)).unwrap();
+            fh.set_times(std::fs::FileTimes::new().set_modified(old))
+                .unwrap();
             drop(fh);
             let mut nm = NewMemory::note(body, name);
             nm.project = Some(proj.to_string());
@@ -665,8 +735,14 @@ mod tests {
             .filter_map(|e| e.ok())
             .filter_map(|e| e.path().ok().map(|p| p.to_string_lossy().into_owned()))
             .collect();
-        assert!(names.contains(&"alpha.md".to_string()), "alpha page packed: {names:?}");
-        assert!(names.contains(&"beta.md".to_string()), "beta page packed: {names:?}");
+        assert!(
+            names.contains(&"alpha.md".to_string()),
+            "alpha page packed: {names:?}"
+        );
+        assert!(
+            names.contains(&"beta.md".to_string()),
+            "beta page packed: {names:?}"
+        );
         // 原归档 md 已删除(保留 tar.gz)
         assert!(!tmp.join("archive/alpha.md").exists(), "archive md removed");
         assert!(!tmp.join("archive/beta.md").exists(), "archive md removed");
@@ -679,7 +755,10 @@ mod tests {
         let api = MemoryApi::new(&store, &cfg);
         // 搜索词 zebraunique 在第 3 句: 摘要=前 2 句, 不含它。
         let id = api
-            .add(NewMemory::note("first sentence. second sentence. zebraunique tail", "fts"))
+            .add(NewMemory::note(
+                "first sentence. second sentence. zebraunique tail",
+                "fts",
+            ))
             .unwrap()
             .id;
         let hit = |api: &MemoryApi| {
@@ -719,19 +798,31 @@ mod tests {
         cfg.edges.max_neighbor_hops = 0;
         let api = MemoryApi::new(&store, &cfg);
         let keep_id = api
-            .add(NewMemory::note("marsupial sleeps. wombat digs burrow. platypusx tail", "keep"))
+            .add(NewMemory::note(
+                "marsupial sleeps. wombat digs burrow. platypusx tail",
+                "keep",
+            ))
             .unwrap()
             .id;
         // 软删最高 rowid 记忆 → 破坏 FTS/memory rowid 对齐
-        let victim_id = api.add(NewMemory::note("victim body", "victim")).unwrap().id;
+        let victim_id = api
+            .add(NewMemory::note("victim body", "victim"))
+            .unwrap()
+            .id;
         api.soft_delete(&victim_id).unwrap();
         // 错位后新增两条: FTS rowid 复用释放槽位, 与各自 memory rowid 不等
         let mis_id = api
-            .add(NewMemory::note("small wallaby hops. forest floor grazes. quokka unique tail", "mis"))
+            .add(NewMemory::note(
+                "small wallaby hops. forest floor grazes. quokka unique tail",
+                "mis",
+            ))
             .unwrap()
             .id;
         let other_id = api
-            .add(NewMemory::note("spiky anteater forages. nests under rocks. echidna unique tail", "other"))
+            .add(NewMemory::note(
+                "spiky anteater forages. nests under rocks. echidna unique tail",
+                "other",
+            ))
             .unwrap()
             .id;
         let fts_rows_with = |api: &MemoryApi, term: &str| -> i64 {
@@ -751,11 +842,22 @@ mod tests {
                 .any(|h| h.memory.id == id)
         };
         // 前置: 错位行的旧全文仍在 memory_fts(就是它让"按 rowid 删"失效)
-        assert_eq!(fts_rows_with(&api, "quokka"), 1, "old fulltext row present before degrade");
-        assert!(hit(&api, &keep_id, "platypusx"), "aligned memory searchable");
+        assert_eq!(
+            fts_rows_with(&api, "quokka"),
+            1,
+            "old fulltext row present before degrade"
+        );
+        assert!(
+            hit(&api, &keep_id, "platypusx"),
+            "aligned memory searchable"
+        );
         degrade_to_entry(&api, &mis_id, "p.md").unwrap();
         // 修复后: 旧全文行按 content 匹配删除, 不再残留
-        assert_eq!(fts_rows_with(&api, "quokka"), 0, "old fulltext row removed (R1)");
+        assert_eq!(
+            fts_rows_with(&api, "quokka"),
+            0,
+            "old fulltext row removed (R1)"
+        );
         assert!(
             !hit(&api, &mis_id, "quokka"),
             "degraded summary (前 2 句) has no term"
@@ -763,7 +865,11 @@ mod tests {
         // 错位态下 other 的 FTS 行挂在 mis 的 rowid 槽: 显式 rowid 重建会将其
         // 顶替——other 自身下次 sync 时按自己的 rowid 重建(其行本就错位,
         // 搜索 other 的词只会错挂到 mis)。
-        assert_eq!(fts_rows_with(&api, "echidna"), 0, "misplaced other row displaced by re-alignment");
+        assert_eq!(
+            fts_rows_with(&api, "echidna"),
+            0,
+            "misplaced other row displaced by re-alignment"
+        );
         assert!(
             hit(&api, &keep_id, "platypusx"),
             "unrelated memory still searchable (no collateral delete)"
@@ -775,11 +881,18 @@ mod tests {
         m.content = "small wallaby hops. forest floor grazes. quokka unique tail".to_string();
         api.update(&m).unwrap();
         sync_fts(&api, &mis_id, &summary).unwrap();
-        assert_eq!(fts_rows_with(&api, "quokka"), 1, "restored fulltext row rebuilt");
+        assert_eq!(
+            fts_rows_with(&api, "quokka"),
+            1,
+            "restored fulltext row rebuilt"
+        );
         // R1 search 路由断言: mis 特有词必须命中 mis 本体, 且不得返回 other
         // 的内容(旧实现自增 INSERT 把行落 MAX+1, search 错挂到 other——
         // 此断言在旧实现下失败, 恰证破坏)。
-        assert!(hit(&api, &mis_id, "quokka"), "mis searchable via own rowid (R1)");
+        assert!(
+            hit(&api, &mis_id, "quokka"),
+            "mis searchable via own rowid (R1)"
+        );
         assert!(
             !hit(&api, &other_id, "quokka"),
             "mis's term must not surface other's memory (R1)"

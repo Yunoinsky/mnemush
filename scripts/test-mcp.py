@@ -33,6 +33,9 @@ if os.path.isdir(DATA_DIR):
 env = os.environ.copy()
 env["MNEMUSH_DB_PATH"] = DB_PATH
 env["MNEMUSH_DATA_DIR"] = DATA_DIR
+# Windows 下子进程默认走 cp1252/gbk,子进程的 stdout 解码会崩;强制 UTF-8。
+env["PYTHONIOENCODING"] = "utf-8"
+env["PYTHONUTF8"] = "1"
 
 proc = subprocess.Popen(
     ["mnemush-mcp.exe" if os.name == "nt" else "mnemush-mcp"],
@@ -41,6 +44,8 @@ proc = subprocess.Popen(
     stderr=subprocess.PIPE,
     env=env,
     text=True,
+    encoding="utf-8",
+    errors="replace",
     bufsize=1,
 )
 

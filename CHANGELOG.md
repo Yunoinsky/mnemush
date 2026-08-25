@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.6.0 (2026-08-21)
+
+### Added
+
+**WebDAV 跨设备同步(自动触发)。** 记忆变更(add/update/soft_delete)提交成功后自动
+后台推送 WebDAV(默认坚果云), 30s 去抖把连续写入合并为一次 push; 默认关闭
+(`[sync] webdav_enabled = false`, 配好 `MNEMUSH_WEBDAV_USER` / `MNEMUSH_WEBDAV_PASS`
+凭证并打开开关才启用)。
+
+- 自动触发(webdav.rs): `mark_sync_dirty`(写 `sync-dirty` 时间戳标记)/
+  `maybe_auto_push`(读标记 → 去抖判断 → 线程内 `Store::open` 重开连接异步 push,
+  fire-and-forget 不阻塞写入)/ `clear_dirty`(push 成功清除; 失败保留, 下次写入重试;
+  仅当 dirty 未被新写入刷新时清除)。
+- `MemoryApi::{add, update, soft_delete}` 成功后挂钩触发, 失败静默。
+- 传输层(推送 `webdav-push`): GET 远程快照 → 双向合并(较新赢 + 并集 + 删除传播)
+  → PUT 带 If-Match 乐观锁(412 自动重试 ≤3 次); `webdav-pull` 拉取合并导入。
+- 新依赖 `base64 = "0.22"`(HTTP Basic auth); `Store::open` 增加 `busy_timeout`
+  (异步 push 线程的多连接并发写等待而非立即 SQLITE_BUSY)。
+
 ## v1.5.0 (2026-08-14)
 
 ### Added

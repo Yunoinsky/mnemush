@@ -136,6 +136,9 @@ impl Store {
         // Sensible pragmas.
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
+        // 多连接场景(webdav 自动同步的异步 push 线程重开连接并发写)下,
+        // 遇到写锁等待而非立即 SQLITE_BUSY。
+        conn.pragma_update(None, "busy_timeout", 5000)?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.pragma_update(None, "temp_store", "MEMORY")?;
         let mut store = Self {

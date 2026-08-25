@@ -23,6 +23,7 @@ pub struct Config {
     pub embedding: EmbeddingConfig,
     pub project: ProjectConfig,
     pub capacity: CapacityConfig,
+    pub sync: SyncConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -242,6 +243,27 @@ pub struct ProjectConfig {
     pub cross_project_search: bool,
 }
 
+/// WebDAV cross-device sync (v1.5). Off by default — the transport
+/// (`webdav-push` / `webdav-pull` CLI) always works when credentials
+/// are set; `webdav_enabled` gates the automatic trigger (later tasks).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SyncConfig {
+    /// Master switch for automatic WebDAV sync.
+    pub webdav_enabled: bool,
+    /// Debounce window (seconds) before an auto-sync fires.
+    pub webdav_debounce_secs: i64,
+}
+
+impl Default for SyncConfig {
+    fn default() -> Self {
+        Self {
+            webdav_enabled: false,
+            webdav_debounce_secs: 30,
+        }
+    }
+}
+
 /// Capacity management (v1.3). Used by the capacity tasks: physical
 /// DB size cap with eviction, neuropil cold judgment, and summary
 /// entry truncation. Search hits refresh `last_accessed_at`, which
@@ -337,7 +359,9 @@ impl Config {
             ));
         }
         if self.edges.max_neighbor_hops > 5 {
-            return Err(MnemushError::Config("max_neighbor_hops must be <= 5".into()));
+            return Err(MnemushError::Config(
+                "max_neighbor_hops must be <= 5".into(),
+            ));
         }
         if self.search.default_limit == 0 {
             return Err(MnemushError::Config(
@@ -345,7 +369,9 @@ impl Config {
             ));
         }
         if self.eval.max_age_days < 0 {
-            return Err(MnemushError::Config("eval.max_age_days must be >= 0".into()));
+            return Err(MnemushError::Config(
+                "eval.max_age_days must be >= 0".into(),
+            ));
         }
         if self.eval.max_entries_per_file == 0 {
             return Err(MnemushError::Config(

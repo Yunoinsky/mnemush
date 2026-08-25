@@ -189,8 +189,13 @@ pub fn decay_all_edges(store: &mut Store, cfg: &Config, now: DateTime<Utc>) -> R
             .and_then(|t| DateTime::<Utc>::from_timestamp(t, 0))
             .unwrap_or_else(|| DateTime::<Utc>::from_timestamp(created_at_ts, 0).unwrap_or(now));
         let days = (now - last).num_days().max(0) as f32;
-        let new_strength =
-            decayed(initial_strength, days, stability.max(0.5), access_count, cfg.forgetting.access_boost_factor);
+        let new_strength = decayed(
+            initial_strength,
+            days,
+            stability.max(0.5),
+            access_count,
+            cfg.forgetting.access_boost_factor,
+        );
         tx.execute(
             "UPDATE memory_edge SET strength = ?1 WHERE id = ?2",
             rusqlite::params![new_strength, id],
@@ -475,11 +480,18 @@ pub fn isolate_hard_delete(
         // (2026-08-06 fix. `mnemush reindex` rebuilds memory_fts
         // wholesale if orphans ever accumulate.)
         let fts_rowid: Option<i64> = tx
-            .query_row("SELECT rowid FROM memory WHERE id = ?1", rusqlite::params![id], |r| r.get(0))
+            .query_row(
+                "SELECT rowid FROM memory WHERE id = ?1",
+                rusqlite::params![id],
+                |r| r.get(0),
+            )
             .optional()?;
         tx.execute("DELETE FROM memory WHERE id = ?1", rusqlite::params![id])?;
         if let Some(rid) = fts_rowid {
-            tx.execute("DELETE FROM memory_fts WHERE rowid = ?1", rusqlite::params![rid])?;
+            tx.execute(
+                "DELETE FROM memory_fts WHERE rowid = ?1",
+                rusqlite::params![rid],
+            )?;
         }
         store.log_event_tx(
             &tx,

@@ -20,8 +20,13 @@ pub struct ConceptEntry {
 
 const TITLE_MAX: usize = 48;
 const NOISE_PREFIXES: &[&str] = &[
-    "Task: ", "Task — ", "task: ",
-    "你是 mnemush 项目的", "你是 mnemush 项目", "你是为 mnemush 项目", "请",
+    "Task: ",
+    "Task — ",
+    "task: ",
+    "你是 mnemush 项目的",
+    "你是 mnemush 项目",
+    "你是为 mnemush 项目",
+    "请",
 ];
 
 /// 规则压缩 title(零 LLM): 第一行 → 剥前缀 → 48 字符截断 → trim。
@@ -41,7 +46,8 @@ pub fn compress_title(t: &str) -> String {
 
 /// 排序分: importance × recency(30 天半衰) × access 提升。
 pub fn score(m: &Memory) -> f32 {
-    let age_days = ((crate::store::Store::now_ts() - m.created_at.timestamp()).max(0) as f32) / 86400.0;
+    let age_days =
+        ((crate::store::Store::now_ts() - m.created_at.timestamp()).max(0) as f32) / 86400.0;
     let recency = 1.0 / (1.0 + age_days / 30.0);
     let access = 1.0 + (1.0 + m.access_count as f32).ln();
     m.importance * recency * access
@@ -60,7 +66,11 @@ pub fn concepts(api: &MemoryApi, limit: usize) -> Result<Vec<ConceptEntry>> {
             score: score(&m),
         })
         .collect();
-    out.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    out.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     out.truncate(limit);
     Ok(out)
 }
@@ -79,8 +89,14 @@ mod tests {
 
     #[test]
     fn compress_title_strips_prefix_and_truncates() {
-        assert_eq!(compress_title("Task: You are a delegated subagent running from a fork"), "You are a delegated subagent running from a fork…");
-        assert_eq!(compress_title("你是 mnemush 项目的实现者, 完成 Task 3"), "实现者, 完成 Task 3");
+        assert_eq!(
+            compress_title("Task: You are a delegated subagent running from a fork"),
+            "You are a delegated subagent running from a fork…"
+        );
+        assert_eq!(
+            compress_title("你是 mnemush 项目的实现者, 完成 Task 3"),
+            "实现者, 完成 Task 3"
+        );
         assert_eq!(compress_title("short title"), "short title");
         assert_eq!(compress_title("第一行\n第二行"), "第一行");
         let long = "x".repeat(100);
@@ -99,8 +115,13 @@ mod tests {
         b.importance = 0.1;
         let id_b = api.add(b).unwrap().id;
         // b 拨旧 100 天
-        api.store.conn.execute("UPDATE memory SET created_at = ?1 WHERE id = ?2",
-            rusqlite::params![crate::store::Store::now_ts() - 100*86400, id_b]).unwrap();
+        api.store
+            .conn
+            .execute(
+                "UPDATE memory SET created_at = ?1 WHERE id = ?2",
+                rusqlite::params![crate::store::Store::now_ts() - 100 * 86400, id_b],
+            )
+            .unwrap();
         let ma = api.get(&id_a).unwrap().unwrap();
         let mb = api.get(&id_b).unwrap().unwrap();
         assert!(score(&ma) > score(&mb), "important+fresh outranks low+old");

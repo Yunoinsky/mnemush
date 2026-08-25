@@ -156,8 +156,10 @@ pub fn import_tree(api: &MemoryApi, dir: &Path, project: &str) -> Result<ImportS
     // 第一遍: 解析文件 → (MemoryFile, memory_id), 增量 add/update。
     let files = collect_md_files(dir)?;
     let mut parsed: Vec<(MemoryFile, String)> = Vec::with_capacity(files.len());
-    let mut id_by_title: std::collections::HashMap<String, String> =
-        existing.iter().map(|(t, m)| (t.clone(), m.id.clone())).collect();
+    let mut id_by_title: std::collections::HashMap<String, String> = existing
+        .iter()
+        .map(|(t, m)| (t.clone(), m.id.clone()))
+        .collect();
     for path in files {
         let mf = match parse_file(&path)? {
             Some(m) => m,
@@ -272,8 +274,7 @@ pub fn import_tree(api: &MemoryApi, dir: &Path, project: &str) -> Result<ImportS
 
 /// 提取正文中的链接: `[[target]]` 与 wiki 风格 `[label](path/ID)`。
 fn inline_wikilinks(content: &str) -> Vec<String> {
-    let re = Regex::new(r"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]|\[[^\]]*\]\(([^)]+)\)")
-        .unwrap();
+    let re = Regex::new(r"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]|\[[^\]]*\]\(([^)]+)\)").unwrap();
     re.captures_iter(content)
         .map(|c| {
             c.get(1)
@@ -294,9 +295,13 @@ fn resolve_target(
 ) -> Option<String> {
     let t = target.trim_start_matches("./");
     let t_norm = t.trim_end_matches(".md");
+    // 路径分隔符在 Windows 上是 `\\`,markdown 链接里通常写 `/`——直接
+    // ends_with 会错过。统一转成 `/` 再比对,跨平台一致。
     if let Some((_, id)) = parsed.iter().find(|(f, _)| {
-        let p = f.path.to_string_lossy();
-        p.ends_with(t) || p.trim_end_matches(".md").ends_with(t_norm)
+        let p_slash = f.path.to_string_lossy().replace('\\', "/");
+        let t_slash = t.replace('\\', "/");
+        let t_norm_slash = t_norm.replace('\\', "/");
+        p_slash.ends_with(&t_slash) || p_slash.trim_end_matches(".md").ends_with(&t_norm_slash)
     }) {
         return Some(id.clone());
     }
@@ -327,7 +332,10 @@ pub fn export_tree(api: &MemoryApi, dir: &Path, project: &str) -> Result<ExportS
         };
         let fm = format!(
             "---\ntitle: {}\ncategory: {}\n{}---\n\n{}\n",
-            m.title, m.category.as_str(), tags, m.content
+            m.title,
+            m.category.as_str(),
+            tags,
+            m.content
         );
         std::fs::write(cat_dir.join(&fname), fm)?;
         stats.written += 1;
@@ -399,7 +407,8 @@ mod tests {
     }
 
     fn tmp_tree(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("neuropil-import-{}-{}", std::process::id(), name));
+        let d =
+            std::env::temp_dir().join(format!("neuropil-import-{}-{}", std::process::id(), name));
         fs::create_dir_all(d.join("lesson/proxy")).unwrap();
         fs::create_dir_all(d.join("decision/rename")).unwrap();
         fs::write(
@@ -492,14 +501,20 @@ mod tests {
             .into_iter()
             .map(|(m, _)| m.id)
             .collect();
-        assert!(neigh.contains(&beta.id), "Alpha linked to Beta via frontmatter links");
+        assert!(
+            neigh.contains(&beta.id),
+            "Alpha linked to Beta via frontmatter links"
+        );
         let neigh2: Vec<String> = eapi
             .neighbors(&beta.id, 1)
             .unwrap()
             .into_iter()
             .map(|(m, _)| m.id)
             .collect();
-        assert!(neigh2.contains(&alpha.id), "Beta linked to Alpha via inline [[Alpha]]");
+        assert!(
+            neigh2.contains(&alpha.id),
+            "Beta linked to Alpha via inline [[Alpha]]"
+        );
     }
 
     fn tmp_tree_wiki_style() -> PathBuf {
@@ -526,9 +541,14 @@ mod tests {
         let dir = tmp_tree_wiki_style();
         import_tree(&api, &dir, "external-wiki-sample").unwrap();
         let eapi = crate::edge::EdgeApi::new(&store, &cfg);
-        let mems = api.list_in_project(100, Some("external-wiki-sample")).unwrap();
+        let mems = api
+            .list_in_project(100, Some("external-wiki-sample"))
+            .unwrap();
         let sleep = mems.iter().find(|m| m.title == "Sleep").unwrap();
-        let paper = mems.iter().find(|m| m.title == "Drosophila sleep paper").unwrap();
+        let paper = mems
+            .iter()
+            .find(|m| m.title == "Drosophila sleep paper")
+            .unwrap();
         let neigh: Vec<String> = eapi
             .neighbors(&sleep.id, 1)
             .unwrap()
@@ -557,14 +577,26 @@ mod tests {
         let api = MemoryApi::new(&store, &cfg);
         let dir = std::env::temp_dir().join(format!("neuropil-copath-{}", std::process::id()));
         fs::create_dir_all(dir.join("topic1")).unwrap();
-        fs::write(dir.join("topic1/m1.md"), "---\ntitle: M1\n---\nContent of m1.\n")
-            .unwrap();
-        fs::write(dir.join("topic1/m2.md"), "---\ntitle: M2\n---\nContent of m2.\n")
-            .unwrap();
-        fs::write(dir.join("topic1/m3.md"), "---\ntitle: M3\n---\nContent of m3.\n")
-            .unwrap();
-        fs::write(dir.join("other.md"), "---\ntitle: Other\n---\nUnrelated content elsewhere.\n")
-            .unwrap();
+        fs::write(
+            dir.join("topic1/m1.md"),
+            "---\ntitle: M1\n---\nContent of m1.\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("topic1/m2.md"),
+            "---\ntitle: M2\n---\nContent of m2.\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("topic1/m3.md"),
+            "---\ntitle: M3\n---\nContent of m3.\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("other.md"),
+            "---\ntitle: Other\n---\nUnrelated content elsewhere.\n",
+        )
+        .unwrap();
         import_tree(&api, &dir, PROJECT).unwrap();
         let eapi = crate::edge::EdgeApi::new(&store, &cfg);
         let mems = api.list_in_project(100, Some(PROJECT)).unwrap();
@@ -591,7 +623,10 @@ mod tests {
             .into_iter()
             .map(|(m, _)| m.id)
             .collect();
-        assert!(!other_neigh.contains(&m1.id), "cross-directory copath edge should not exist");
+        assert!(
+            !other_neigh.contains(&m1.id),
+            "cross-directory copath edge should not exist"
+        );
     }
 
     #[test]

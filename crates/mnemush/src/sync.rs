@@ -34,11 +34,12 @@
 //! git clone ... && mnemush sync import ./mnemush-sync
 //! ```
 //!
-//! Conflicts: when an `import` finds a memory id whose local
-//! `updated_at` is more recent than the snapshot's `updated_at`, and
-//! neither side has been re-exported since, the row is left in place
-//! and reported. Resolving is a manual `mnemush list --project ...` + delete
-//! + re-import flow (no auto-merge — that's git's job).
+//! Conflicts: resolved per memory by auto-merge — same id compared on
+//! `max(last_accessed_at, created_at)`, newer side wins; ids on one
+//! side only are unioned; soft-delete (`deleted_at`) travels with the
+//! newer side (deletion propagates). `import_from` applies the merge
+//! and reports ids where the local side was strictly newer (those rows
+//! are left untouched).
 //!
 //! Schema-versioned: import refuses to apply a snapshot from a NEWER
 //! schema_version than this binary supports (downgrade allowed — it's
@@ -53,7 +54,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::embeddings::StoredEmbedding;
 use crate::error::{MnemushError, Result};
-use crate::schema::Edge;
+use crate::schema::{Edge, Memory};
 use crate::store::Store;
 use crate::VERSION;
 
@@ -176,9 +177,9 @@ pub fn init_sync(store: &Store, dir: &Path) -> Result<Manifest> {
 /// Import all DB state + identity + embeddings from `dir` into
 /// `store`. Refuses to apply snapshots from a newer schema_version
 /// (the importer can downgrade, but not upgrade past what this
-/// binary supports). Reports per-memory conflicts (local
-/// `updated_at` > snapshot `updated_at`) but does NOT auto-resolve
-/// them — that's the user's job, manually.
+/// binary supports). Memory rows are merged per-id (newer side wins,
+/// union of ids, deletion propagates); ids where the local DB is
+/// strictly newer are reported as conflicts and left untouched.
 pub fn import_from(store: &Store, dir: &Path) -> Result<ImportReport> {
     let manifest = read_manifest(dir)?;
     let current_version = read_schema_version(store)?;
@@ -191,50 +192,38 @@ pub fn import_from(store: &Store, dir: &Path) -> Result<ImportReport> {
     }
 
     // Memory rows
-    let path = dir.join("memory.json");
-    let body = fs::read_to_string(&path)
-        .map_err(|e| MnemushError::Other(format!("read memory.json: {}", e)))?;
-    let snapshot: Vec<crate::schema::Memory> = serde_json::from_str(&body)?;
+    let snapshot = read_snapshot_memories(dir)?;
     let mut report = ImportReport::default();
-    for mem in snapshot {
+
+    // 逐条合并(较新赢 + 并集 + 删除传播), 再把远端较新者写回本地。
+    let local_all = read_all_memories(store)?;
+    let local_ts: std::collections::HashMap<String, i64> = local_all
+        .iter()
+        .map(|m| (m.id.clone(), updated_ts(m)))
+        .collect();
+    let snapshot_ids: std::collections::HashSet<String> =
+        snapshot.iter().map(|m| m.id.clone()).collect();
+    let snapshot_ts: std::collections::HashMap<String, i64> = snapshot
+        .iter()
+        .map(|m| (m.id.clone(), updated_ts(m)))
+        .collect();
+    let merged = merge_memories(local_all, snapshot);
+    for mem in merged {
         let id = mem.id.clone();
-        let local_updated_at = store
-            .get_by_id(&id)
-            .ok()
-            .flatten()
-            .map(|m| m.last_accessed_at.timestamp().max(m.created_at.timestamp()));
-        let snapshot_updated_at = mem
-            .last_accessed_at
-            .timestamp()
-            .max(mem.created_at.timestamp());
-        if let Some(local) = local_updated_at {
-            if local > snapshot_updated_at {
-                // Local is newer — conflict, skip.
-                report.conflicts.push(id);
-                continue;
+        // 纯本地行不动(保留其 edges)。
+        if !snapshot_ids.contains(&id) {
+            continue;
+        }
+        // 本地严格较新 → 冲突: 保留本地, 上报。
+        if let Some(lt) = local_ts.get(&id) {
+            if let Some(st) = snapshot_ts.get(&id) {
+                if lt > st {
+                    report.conflicts.push(id);
+                    continue;
+                }
             }
         }
-        // Upsert: if the id exists, DELETE first (the memory row + its
-        // FTS5 entry cascade via delete_memory_tx semantics — we just
-        // clear the row; the FTS5 row stays orphaned but harmless, or
-        // gets overwritten by the fresh insert's new FTS5 row).
-        let tx = store.conn.unchecked_transaction()?;
-        let exists: bool = store
-            .conn
-            .query_row(
-                "SELECT 1 FROM memory WHERE id = ?1",
-                params![&mem.id],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some();
-        if exists {
-            // Remove the memory row (FK cascade clears edges); the
-            // FTS5 entry is re-added by insert_memory_tx below.
-            tx.execute("DELETE FROM memory WHERE id = ?1", params![&mem.id])?;
-        }
-        Store::insert_memory_tx(&tx, &mem)?;
-        tx.commit()?;
+        upsert_memory_tx(store, &mem)?;
         report.imported += 1;
     }
 
@@ -244,7 +233,9 @@ pub fn import_from(store: &Store, dir: &Path) -> Result<ImportReport> {
         let body = fs::read_to_string(&edges_path)?;
         let edges: Vec<Edge> = serde_json::from_str(&body)?;
         for e in edges {
-            store.conn.execute(
+            // 容错: 端点记忆合并后不存在(FK 失败)/重复 → 跳过该边,
+            // 不中断整个 import(快照可能引用本地较新未导入/已删记忆)。
+            let res = store.conn.execute(
                 r#"INSERT OR REPLACE INTO memory_edge (
                     id, source_id, target_id, edge_type,
                     strength, initial_strength, bidirectional,
@@ -269,8 +260,14 @@ pub fn import_from(store: &Store, dir: &Path) -> Result<ImportReport> {
                     e.created_at.timestamp(),
                     e.deleted_at.map(|d| d.timestamp()),
                 ],
-            )?;
-            report.edges_imported += 1;
+            );
+            match res {
+                Ok(_) => report.edges_imported += 1,
+                Err(err) => {
+                    report.skipped_edges += 1;
+                    eprintln!("sync: skip edge {} ({}): {err}", e.id, e.source_id);
+                }
+            }
         }
     }
 
@@ -341,6 +338,110 @@ pub struct ImportReport {
     pub identity_copied: usize,
     pub embeddings_imported: usize,
     pub conflicts: Vec<String>,
+    /// 导入时跳过的边(端点记忆合并后不存在, FK 失败)。
+    pub skipped_edges: usize,
+}
+
+/// 条目的"更新时间": last_accessed 与 created 取较新, 再并入 deleted_at
+/// (软删行的新鲜度 = 删除时刻, 否则删除传播在真实形态下失效 —— 软删只
+/// 写 deleted_at 不 bump 时间戳)。合并/冲突判定共用。
+fn updated_ts(m: &Memory) -> i64 {
+    m.last_accessed_at
+        .timestamp()
+        .max(m.created_at.timestamp())
+        .max(m.deleted_at.map(|d| d.timestamp()).unwrap_or(i64::MIN))
+}
+
+/// 逐条合并 local/remote 两组记忆: 同 id 比更新时间(max(last_accessed,
+/// created)), 较新者赢; 仅一侧存在的 id 并集; 软删(deleted_at)随较新者
+/// 传播(删除传播)。供 webdav push 双向合并与 import_from 共用。
+pub fn merge_memories(local: Vec<Memory>, remote: Vec<Memory>) -> Vec<Memory> {
+    let mut out: std::collections::BTreeMap<String, Memory> = std::collections::BTreeMap::new();
+    for m in local {
+        out.insert(m.id.clone(), m);
+    }
+    for r in remote {
+        match out.get(&r.id) {
+            Some(l) if updated_ts(l) > updated_ts(&r) => { /* local newer, keep */ }
+            _ => {
+                out.insert(r.id.clone(), r);
+            }
+        }
+    }
+    out.into_values().collect()
+}
+
+/// 读取快照目录中的 memory.json(全部行, 含软删)。
+pub fn read_snapshot_memories(dir: &Path) -> Result<Vec<Memory>> {
+    let path = dir.join("memory.json");
+    let body = fs::read_to_string(&path)
+        .map_err(|e| MnemushError::Other(format!("read {}: {}", path.display(), e)))?;
+    Ok(serde_json::from_str(&body)?)
+}
+
+/// 按 import 语义 upsert 一条 memory: 已存在则先 DELETE(FK 级联清
+/// edges; FTS5 由 insert_memory_tx 重建), 再插入。
+fn upsert_memory_tx(store: &Store, mem: &Memory) -> Result<()> {
+    let tx = store.conn.unchecked_transaction()?;
+    let exists: bool = store
+        .conn
+        .query_row(
+            "SELECT 1 FROM memory WHERE id = ?1",
+            params![&mem.id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if exists {
+        // UPDATE 保留 id 与边(FK 不级联) —— 之前 DELETE+重插会 FK 级联
+        // 清掉该记忆的所有边(同步时边丢失事故的根源)。
+        Store::update_memory_tx(&tx, mem)?;
+        // FTS5 同步: 内容可能变。删旧行再按 memory 行(rowid 对齐)插新。
+        tx.execute(
+            "DELETE FROM memory_fts WHERE rowid = (SELECT rowid FROM memory WHERE id = ?1)",
+            params![&mem.id],
+        )?;
+        tx.execute(
+            "INSERT OR REPLACE INTO memory_fts(rowid, title, content, context, tags) \
+             SELECT rowid, title, content, context, tags FROM memory WHERE id = ?1",
+            params![&mem.id],
+        )?;
+    } else {
+        Store::insert_memory_tx(&tx, mem)?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// push 双向合并后把结果写回本地 DB: 仅当远端"贡献"了该行(远端较新/
+/// 平局或仅远端存在)时 upsert; 本地较新或仅本地存在的行不动(保留其
+/// edges)。local/remote 是合并前的两组快照。
+pub(crate) fn apply_merge_to_db(
+    store: &Store,
+    merged: &[Memory],
+    local: &[Memory],
+    remote: &[Memory],
+) -> Result<usize> {
+    let local_ts: std::collections::HashMap<&str, i64> =
+        local.iter().map(|m| (m.id.as_str(), updated_ts(m))).collect();
+    let remote_ts: std::collections::HashMap<&str, i64> =
+        remote.iter().map(|m| (m.id.as_str(), updated_ts(m))).collect();
+    let mut written = 0;
+    for mem in merged {
+        // 仅本地存在的行: 合并行即本地行, 不需要写回。
+        let Some(rt) = remote_ts.get(mem.id.as_str()) else {
+            continue;
+        };
+        // 本地严格较新: 合并行即本地行(冲突保留), 不需要写回。
+        if let Some(lt) = local_ts.get(mem.id.as_str()) {
+            if lt > rt {
+                continue;
+            }
+        }
+        upsert_memory_tx(store, mem)?;
+        written += 1;
+    }
+    Ok(written)
 }
 
 // ── helpers ────────────────────────────────────────────────────────
@@ -443,7 +544,8 @@ fn copy_embeddings(store: &Store, dest_dir: &Path) -> Result<()> {
             .collect();
         let path = dest_dir.join(format!("{}__{}.json", model_safe, s.memory_id));
         let body = serde_json::to_vec(&s)?;
-        fs::write(&path, body).map_err(|e| MnemushError::Other(format!("write embedding: {}", e)))?;
+        fs::write(&path, body)
+            .map_err(|e| MnemushError::Other(format!("write embedding: {}", e)))?;
     }
     Ok(())
 }
@@ -540,6 +642,87 @@ mod tests {
         let out = git(dir.path(), &["ls-files"]).unwrap();
         assert!(out.contains("memory.json"));
         assert!(out.contains("MANIFEST.json"));
+    }
+
+    /// 构造一个最小 Memory(测试用): 只关心 id/content/时间戳/软删。
+    fn mk(id: &str, content: &str, ts: i64) -> Memory {
+        use crate::schema::{ActionStatus, Category, MemoryType, Source, Tier};
+        Memory {
+            id: id.to_string(),
+            memory_type: MemoryType::Semantic,
+            tier: Tier::Global,
+            category: Category::Note,
+            title: String::new(),
+            content: content.to_string(),
+            context: None,
+            topic_key: None,
+            tags: Vec::new(),
+            project: None,
+            source: Source::Manual,
+            initial_confidence: 1.0,
+            confidence: 1.0,
+            importance: 0.5,
+            access_count: 0,
+            last_accessed_at: Store::ts_to_dt(ts),
+            created_at: Store::ts_to_dt(ts),
+            override_half_life: None,
+            never_prune: false,
+            never_decay: false,
+            content_hash: String::new(),
+            deleted_at: None,
+            needs_review: false,
+            status: ActionStatus::Active,
+            due_at: None,
+            claimed_by: None,
+            parent_id: None,
+            completed_at: None,
+        }
+    }
+
+    /// 逐条合并: 较新赢 + 并集 + 删除传播(push/pull 共用)。
+    #[test]
+    fn merge_newer_wins_and_union() {
+        let local = vec![mk("a1", "old", 100), mk("a2", "x", 200)];
+        let remote = vec![mk("a1", "new", 300), mk("b1", "y", 150)];
+        let merged = merge_memories(local, remote);
+        let by_id: std::collections::HashMap<_, _> =
+            merged.into_iter().map(|m| (m.id, m.content)).collect();
+        assert_eq!(by_id.get("a1").unwrap(), "new", "remote newer wins");
+        assert_eq!(by_id.get("a2").unwrap(), "x", "local-only kept");
+        assert_eq!(by_id.get("b1").unwrap(), "y", "remote-only added");
+        assert_eq!(by_id.len(), 3, "union of both sides");
+    }
+
+    /// 真实形态: 软删行时间戳停留在删除前最后一次活动, 删除时刻只记在
+    /// deleted_at。本地已删(last_accessed=150, 删除于 200) vs 远端活跃
+    /// (last_accessed=170) → 远端较新? 不 —— 删除行新鲜度 = deleted_at,
+    /// 合并后必须保持删除, 否则远端静默复活已删记忆。
+    #[test]
+    fn merge_deletion_wins_when_delete_ts_is_newer_than_remote_activity() {
+        let mut local_del = mk("a1", "gone", 150);
+        local_del.deleted_at = Some(Store::ts_to_dt(200));
+        let remote = mk("a1", "alive", 170); // 活跃于删除(200)之前
+        let merged = merge_memories(vec![local_del], vec![remote]);
+        assert!(
+            merged[0].deleted_at.is_some(),
+            "deleted_at=200 的本地软删必须赢过 last_accessed=170 的远端活跃行"
+        );
+    }
+
+    /// 软删随较新者传播: 任一端删除比另一端更新 → 合并结果保持删除。
+    #[test]
+    fn merge_deletion_propagates() {
+        // 本地已删(较新) vs 远端活跃 → 删除保持。
+        let mut local_del = mk("a1", "gone", 400);
+        local_del.deleted_at = Some(Store::ts_to_dt(400));
+        let merged = merge_memories(vec![local_del], vec![mk("a1", "alive", 100)]);
+        assert!(merged[0].deleted_at.is_some(), "local deletion (newer) wins");
+
+        // 远端已删(较新) vs 本地活跃 → 删除传播。
+        let mut remote_del = mk("b1", "gone", 400);
+        remote_del.deleted_at = Some(Store::ts_to_dt(400));
+        let merged = merge_memories(vec![mk("b1", "alive", 100)], vec![remote_del]);
+        assert!(merged[0].deleted_at.is_some(), "remote deletion (newer) wins");
     }
 
     /// Importing a snapshot from a newer schema_version is refused.

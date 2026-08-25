@@ -42,6 +42,8 @@ Two layers, mirroring insect neurobiology:
 
 ## Status
 
+**v1.6.0 (2026-08-21)** — WebDAV cross-device sync, automatic: memory writes (add/update/soft-delete) mark dirty, a background push fires 30s after the last write (debounced); disabled by default (`[sync] webdav_enabled=false`, enable via `MNEMUSH_WEBDAV_USER` / `MNEMUSH_WEBDAV_PASS`). Two-way merge (newer wins + union + deletion propagation) with ETag optimistic locking.
+
 **v1.5.0 (2026-08-14)** — DeepSeek Harness 插件: `mnemush-dsh` 原生 Cordis 插件, 16 个 memory 工具 + 概念表注入 + session 维护(与 Pi 插件同契约)。
 
 **v1.4.0 (2026-08-07)** — concept table (context priming index): `mnemush concepts` ranks top-N by importance×recency×access; Pi extension injects at session_start and refreshes on writes. Tells the agent what's retrievable (prefrontal retrieval cues).

@@ -29,11 +29,12 @@ pub mod identity;
 pub mod llm;
 pub mod memory;
 pub mod migrations;
+pub mod neuropils;
 pub mod scanner;
 pub mod schema;
 pub mod store;
 pub mod sync;
-pub mod neuropils;
+pub mod webdav;
 
 pub use error::{MnemushError, Result};
 pub use schema::{
@@ -43,19 +44,28 @@ pub use schema::{
 /// Mnemush version, also surfaced through `mnemush --version`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Default data directory (`$HOME/.mnemush`).
+/// Default data directory (`$HOME/.mnemush`, with Windows fallback).
+/// Windows 下当 `HOME` 未设置时回退到 `USERPROFILE`(cmd/PowerShell 直跑时
+/// HOME 可能未设,USERPROFILE 恒在);再 fallback 到当前目录(legacy 行为)。
 pub fn default_data_dir() -> std::path::PathBuf {
     if let Ok(p) = std::env::var("MNEMUSH_DATA_DIR") {
         return std::path::PathBuf::from(p);
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let home = std::env::var("HOME")
+        .ok()
+        .or_else(|| std::env::var("USERPROFILE").ok())
+        .unwrap_or_else(|| ".".to_string());
     std::path::PathBuf::from(home).join(".mnemush")
 }
 
-/// Expand a leading `~/` to `$HOME`. Other paths are returned unchanged.
+/// Expand a leading `~/` to `$HOME` (or `%USERPROFILE%` on Windows).
+/// 其他路径原样返回。
 pub fn expand_tilde(s: &str) -> std::path::PathBuf {
     if let Some(rest) = s.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
+        let home = std::env::var("HOME")
+            .ok()
+            .or_else(|| std::env::var("USERPROFILE").ok());
+        if let Some(home) = home {
             return std::path::PathBuf::from(home).join(rest);
         }
     }
@@ -63,12 +73,15 @@ pub fn expand_tilde(s: &str) -> std::path::PathBuf {
 }
 
 /// Truncate to the first `n` chars, appending `…` when longer.
+/// 一次遍历: 超过 n 时 stop + 加省略号.
 pub fn truncate(s: &str, n: usize) -> String {
-    let mut out: String = s.chars().take(n).collect();
-    if s.chars().count() > n {
-        out.push('…');
+    let mut iter = s.chars();
+    let taken: String = iter.by_ref().take(n).collect();
+    if iter.next().is_some() {
+        taken + "…"
+    } else {
+        taken
     }
-    out
 }
 
 /// Initialize tracing subscriber. Honors `RUST_LOG`; defaults to `warn`.

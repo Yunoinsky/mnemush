@@ -4,7 +4,7 @@
 //! and returns a frozen snapshot suitable for injection into a system
 //! prompt. Files are plain markdown with optional `§` entry separators
 //! (we currently treat the whole file as a block; parsing entries is
-//! future work).
+//! reserved for when the file actually uses `§` separators).
 //!
 //! Also implements the v0.2 identity-reflection flow: the LLM observes
 //! user behavior across sessions and proposes updates to USER.md /
