@@ -117,10 +117,35 @@ impl Migration for V3ToV4 {
     }
 }
 
+/// v0.4 → v1.6.2: add the `origin_device` column to the `memory` table
+/// for cross-device sync provenance (v1.6.2). Defaults to NULL — the
+/// `mnemush memory reorigin` command can backfill NULL rows for an
+/// existing install where all memories are known to have come from
+/// one device. Idempotent: re-running on a half-migrated DB is a
+/// no-op (uses `has_column` guard).
+pub struct V4ToV5;
+impl Migration for V4ToV5 {
+    fn target_version(&self) -> i64 {
+        5
+    }
+    fn up(&self, tx: &Transaction) -> Result<()> {
+        if !has_column(tx, "origin_device")? {
+            tx.execute_batch("ALTER TABLE memory ADD COLUMN origin_device TEXT")
+                .map_err(|e| MnemushError::Other(format!("migration v4->v5: {}", e)))?;
+        }
+        Ok(())
+    }
+}
+
 /// All known migrations, in order. Append new entries here when
 /// bumping `SCHEMA_VERSION`; no other code needs to change.
 pub fn default_registry() -> Vec<Box<dyn Migration>> {
-    vec![Box::new(V1ToV2), Box::new(V2ToV3), Box::new(V3ToV4)]
+    vec![
+        Box::new(V1ToV2),
+        Box::new(V2ToV3),
+        Box::new(V3ToV4),
+        Box::new(V4ToV5),
+    ]
 }
 
 fn column_name_from_add(sql: &str) -> Option<&str> {

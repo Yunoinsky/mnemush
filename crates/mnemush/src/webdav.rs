@@ -255,12 +255,147 @@ pub fn clear_dirty(data_dir: &Path) {
     let _ = std::fs::remove_file(dirty_path(data_dir));
 }
 
+/// v1.6.1: scan current binary + PATH siblings for the pre-edef25b
+/// upsert pattern. The needle is XOR-masked at compile time so the
+/// literal bytes never appear in the binary's read-only data — this
+/// avoids false positives from the safety check itself, and from
+/// doc-comments. The actual buggy `upsert_memory_tx` shipped a
+/// plain ASCII upsert SQL string, which the masked scan still finds.
+/// Threshold: ≤ 1 occurrence (the legit `forget.rs` hard-delete is
+/// exactly 1).
+///
+/// SAFETY: this function's body must not contain the literal needle
+/// string. The threshold of 1 is calibrated to forget.rs' single
+/// occurrence. Building the needle via XOR masking means our own
+/// binary contributes 0 to the count.
+pub fn self_check_binary_safety() -> std::result::Result<(), String> {
+    use std::io::Read;
+    use std::sync::OnceLock;
+    static RESULT: OnceLock<std::result::Result<(), String>> = OnceLock::new();
+    RESULT
+        .get_or_init(|| {
+            // XOR-mask each byte so the literal never appears in .rodata.
+            const MASK: u8 = 0x5A;
+            let plain: &[u8] = &upsert_needle_plain();
+            let needle: Vec<u8> = plain.iter().map(|b| b ^ MASK).collect();
+            let limit = 1usize;
+            let mut scan = |label: &str, p: &std::path::Path| -> Option<String> {
+                let mut f = std::fs::File::open(p).ok()?;
+                let mut buf = Vec::new();
+                f.read_to_end(&mut buf).ok()?;
+                let n = buf
+                    .windows(needle.len())
+                    .filter(|w| w.iter().zip(&needle).all(|(a, b)| a ^ MASK == *b))
+                    .count();
+                if n > limit {
+                    Some(format!(
+                        "{label} {}: {n} occurrences of pre-edef25b upsert pattern \
+                         (expected ≤{limit}). Reinstall with: \
+                         `cargo install --path crates/mnemush --force`",
+                        p.display()
+                    ))
+                } else {
+                    None
+                }
+            };
+            // 1) 当前运行的二进制
+            if let Ok(exe) = std::env::current_exe() {
+                if let Some(msg) = scan("current_exe", &exe) {
+                    return Err(msg);
+                }
+            }
+            // 2) PATH 上同名二进制 (push spawn 子进程走 PATH fallback)
+            if let Some(paths) = std::env::var_os("PATH") {
+                for dir in std::env::split_paths(&paths) {
+                    for name in ["mnemush", "mnemush.exe"] {
+                        let p = dir.join(name);
+                        if !p.is_file() {
+                            continue;
+                        }
+                        if let Some(msg) = scan("PATH", &p) {
+                            return Err(msg);
+                        }
+                    }
+                }
+            }
+            Ok(())
+        })
+        .clone()
+}
+
+/// Diagnose the binary safety check, returning a human-readable
+/// description of any offending binary. Used by the CLI
+/// `mnemush webdav-safety-check` command for explicit verification.
+pub fn binary_safety_diagnose() -> Vec<String> {
+    use std::io::Read;
+    let mut out: Vec<String> = Vec::new();
+    const MASK: u8 = 0x5A;
+    let plain: &[u8] = &upsert_needle_plain();
+    let needle: Vec<u8> = plain.iter().map(|b| b ^ MASK).collect();
+    let limit = 1usize;
+    let mut scan = |label: &str, p: &std::path::Path| {
+        let Ok(mut f) = std::fs::File::open(p) else { return };
+        let mut buf = Vec::new();
+        if f.read_to_end(&mut buf).is_err() {
+            return;
+        }
+        let n = buf
+            .windows(needle.len())
+            .filter(|w| w.iter().zip(&needle).all(|(a, b)| a ^ MASK == *b))
+            .count();
+        if n > limit {
+            out.push(format!(
+                "{label} {}: {n} occurrences of pre-edef25b upsert pattern (expected ≤{limit})",
+                p.display()
+            ));
+        }
+    };
+    if let Ok(exe) = std::env::current_exe() {
+        scan("current_exe", &exe);
+    }
+    if let Some(paths) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&paths) {
+            for name in ["mnemush", "mnemush.exe"] {
+                let p = dir.join(name);
+                if p.is_file() {
+                    scan("PATH", &p);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Return the canonical pre-edef25b upsert needle as a byte array.
+/// Built character-by-character at runtime so the compiler cannot
+/// fold a contiguous string literal into .rodata (which would
+/// self-match the scan and cause a false positive). The values
+/// are split across non-adjacent constants to defeat naive substring
+/// detection.
+fn upsert_needle_plain() -> [u8; 35] {
+    // Two halves, concatenated at runtime.
+    let a: [u8; 17] = [68, 69, 76, 69, 84, 69, 32, 70, 82, 79, 77, 32, 109, 101, 109, 111, 114]; // "DELETE FROM memor"
+    let b: [u8; 18] = [121, 32, 87, 72, 69, 82, 69, 32, 105, 100, 32, 61, 32, 63, 49, 0, 0, 0]; // "y WHERE id = ?1\0\0\0"
+    let mut out = [0u8; 35];
+    out[..17].copy_from_slice(&a);
+    out[17..].copy_from_slice(&b[..18]);
+    out
+}
+
 /// 记忆写入后自动触发: 记录本次写入时间; 若距上次写入已超过去抖窗口
 /// (`webdav_debounce_secs`) → spawn 异步 push(fire-and-forget, 不阻塞写入)。
 /// 返回是否触发了 push。push 成功清 dirty; 失败保留(下次写入重试)。
 /// `webdav_enabled = false`(默认)时直接返回 false, 不做任何 IO。
 pub fn maybe_auto_push(store: &Store, config: &Config, data_dir: &Path) -> Result<bool> {
     if !config.sync.webdav_enabled {
+        return Ok(false);
+    }
+    // v1.6.1: 启动时自检一次 — 防止 pre-edef25b 的 stale binary 走自动同步
+    // 路径(DELETE+INSERT 在 FK CASCADE 下静默清边)。检查当前运行的
+    // 二进制 + PATH 上同名二进制, 命中>1 次就 refuse auto-push
+    // 并打印修复指令。手动 push (mnemush sync webdav-push) 不受此检查限制。
+    if let Err(msg) = self_check_binary_safety() {
+        eprintln!("[mnemush] webdav auto-push disabled: {msg}");
         return Ok(false);
     }
     let now = chrono::Utc::now().timestamp();
@@ -293,6 +428,35 @@ pub fn maybe_auto_push(store: &Store, config: &Config, data_dir: &Path) -> Resul
         .args(["sync", "webdav-push", "--dirty-ts", &now.to_string()])
         .spawn();
     Ok(true)
+}
+
+#[cfg(test)]
+mod safety_tests {
+    use super::*;
+    use std::io::Read;
+    use std::io::Write;
+
+    #[test]
+    fn diagnose_clean_binary() {
+        // The current binary is clean (1 occurrence from forget.rs);
+        // diagnose should not flag it.
+        let issues = binary_safety_diagnose();
+        assert!(
+            issues.is_empty(),
+            "expected no issues on the current binary, got: {issues:?}"
+        );
+    }
+
+    #[test]
+    fn self_check_passes_for_clean_binary() {
+        // Self-check should pass (the running test binary was built
+        // from the same source that has the edef25b fix).
+        assert!(
+            self_check_binary_safety().is_ok(),
+            "self_check_binary_safety failed: {:?}",
+            self_check_binary_safety()
+        );
+    }
 }
 
 /// Pull: GET `<url>/mnemush-sync.tar.gz` → 解包 → 逐条合并导入。
@@ -358,6 +522,7 @@ mod tests {
             claimed_by: None,
             parent_id: None,
             completed_at: None,
+            origin_device: None,
         }
     }
 

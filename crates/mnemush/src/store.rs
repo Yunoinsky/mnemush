@@ -19,7 +19,7 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use crate::error::{MnemushError, Result};
 use crate::schema::{Category, Edge, Memory, MemoryType, Source, Tier};
 
-pub(super) const SCHEMA_VERSION: i32 = 4;
+pub(super) const SCHEMA_VERSION: i32 = 5;
 
 pub(super) const SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -59,7 +59,11 @@ CREATE TABLE IF NOT EXISTS memory (
     due_at INTEGER,
     claimed_by TEXT,
     parent_id TEXT,
-    completed_at INTEGER
+    completed_at INTEGER,
+
+    -- v1.6.2: device id of the first creator. NULL for memories
+    -- migrated from v4 (use `mnemush memory reorigin` to backfill).
+    origin_device TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_memory_type ON memory(memory_type);
@@ -272,11 +276,12 @@ impl Store {
                 access_count, last_accessed_at, created_at,
                 override_half_life, never_prune, never_decay,
                 content_hash, deleted_at, needs_review,
-                status, due_at, claimed_by, parent_id, completed_at
+                status, due_at, claimed_by, parent_id, completed_at,
+                origin_device
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
                 ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23,
-                ?24, ?25, ?26, ?27, ?28
+                ?24, ?25, ?26, ?27, ?28, ?29
             )"#,
             params![
                 m.id,
@@ -307,6 +312,7 @@ impl Store {
                 &m.claimed_by,
                 &m.parent_id,
                 m.completed_at.map(|d| d.timestamp()),
+                &m.origin_device,
             ],
         )?;
         // FTS5 gets its own auto-assigned rowid (omit `rowid` column).
@@ -386,6 +392,7 @@ impl Store {
             claimed_by,
             parent_id,
             completed_at: completed_at_ts.and_then(Self::ts_to_dt_opt),
+            origin_device: row.get("origin_device")?,
         })
     }
 
@@ -403,7 +410,8 @@ impl Store {
                 access_count=?15, last_accessed_at=?16, created_at=?17,
                 override_half_life=?18, never_prune=?19, never_decay=?20,
                 content_hash=?21, deleted_at=?22, needs_review=?23,
-                status=?24, due_at=?25, claimed_by=?26, parent_id=?27, completed_at=?28
+                status=?24, due_at=?25, claimed_by=?26, parent_id=?27, completed_at=?28,
+                origin_device=?29
               WHERE id=?1"#,
             params![
                 m.id,
@@ -434,6 +442,7 @@ impl Store {
                 &m.claimed_by,
                 &m.parent_id,
                 m.completed_at.map(|d| d.timestamp()),
+                &m.origin_device,
             ],
         )?;
         Ok(())
@@ -837,6 +846,7 @@ mod tests {
             claimed_by: None,
             parent_id: None,
             completed_at: None,
+            origin_device: None,
         }
     }
 }

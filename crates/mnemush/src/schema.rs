@@ -261,6 +261,14 @@ pub struct Memory {
     /// When `status` became Completed (or Abandoned). Set by the
     /// layer that performs the transition, not by direct assignment.
     pub completed_at: Option<DateTime<Utc>>,
+    /// v1.6.2: device id that first created this memory. Stable across
+    /// sync — the original creator's id travels with the memory and
+    /// is preserved by the merge (older `created_at`'s origin wins).
+    /// `None` for memories created before v1.6.2 migration ran, or
+    /// if device_id generation was disabled. Stamped at insert time
+    /// by `MemoryApi::add` from the local `device_id` file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_device: Option<String>,
 }
 
 /// Lifecycle state for a memory. Distinct from `category`: any memory

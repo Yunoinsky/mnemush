@@ -1,6 +1,6 @@
 [package]
 name = "mnemush"
-version = "1.6.0"
+version = "1.6.2"
 edition = "2021"
 authors = ["Yunoinsky Chen"]
 rust-version = "1.75"
@@ -67,6 +67,12 @@ anyhow = "1"
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Dream daemon (v1.6.1): PID liveness check via libc::kill on unix. Windows
+# has no equivalent in std; we use a conservative "file present => refuse"
+# fallback there.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

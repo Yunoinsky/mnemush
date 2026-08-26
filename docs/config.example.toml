@@ -134,6 +134,31 @@ entry_summary_chars = 300   # summary entries truncate content to N chars
 eviction_batch = 100        # eviction processes N entries per batch
 dream_sample_m = 3           # dream 采样: 每种子点随机取 ≤m 邻居, 延伸 2 级(≤10·m² 条/轮)
 
+# ── LLM provider (v1.6.1) ────────────────────────────────────────────────
+# `auto` walks MiniMax → Local → DeepSeek in order. Each provider's URL,
+# model, and key are listed under their own sub-block. Local is always
+# probed in `auto` (cheap; a 4xx response falls through to the next).
+[llm]
+provider       = "auto"            # auto | minimax | deepseek | local
+local_base_url = "http://localhost:11434/v1"   # Ollama default
+local_model    = "qwen3.8:27b-q4_K_M"
+local_api_key  = ""                # Ollama ignores; LM Studio may want any string
+fallback_to_local = true            # fall through to local on any cloud error
+
+# ── Dream scheduler (v1.6.1) ─────────────────────────────────────────────
+# `provider` pins the dream call to one provider (no chain walk). Default
+# is "minimax" for stable etype discipline; switch to "local" if you want
+# free dream on a 4090, or "auto" to fall through the LLM chain.
+# Daily budget gate only applies to non-local providers (local is free).
+[dream]
+enabled            = false          # master switch for the 2am daemon
+scheduled_time     = "02:00"        # local time, daily
+timezone           = ""             # empty = system local
+provider           = "minimax"      # auto | minimax | deepseek | local
+daily_token_budget = 500_000        # skip dream if today's tokens exceed this
+chunked            = false          # opt-in: smaller prompts but lose cross-batch actions
+chunk_size         = 10             # candidates per chunk when chunked = true
+
 # ── WebDAV cross-device sync (v1.6) ────────────────────────────────────
 # Off by default. Automatic sync triggers only when webdav_enabled = true
 # AND credentials are in the environment:

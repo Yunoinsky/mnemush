@@ -19,6 +19,8 @@ pub mod capacity;
 pub mod concepts;
 pub mod config;
 pub mod consolidate;
+pub mod daemon;
+pub mod device;
 pub mod edge;
 pub mod embeddings;
 pub mod error;

@@ -355,15 +355,60 @@ fn updated_ts(m: &Memory) -> i64 {
 /// 逐条合并 local/remote 两组记忆: 同 id 比更新时间(max(last_accessed,
 /// created)), 较新者赢; 仅一侧存在的 id 并集; 软删(deleted_at)随较新者
 /// 传播(删除传播)。供 webdav push 双向合并与 import_from 共用。
+///
+/// v1.6.2: `origin_device` 是历史事实 —— 取两边 **created_at 较旧者**
+/// 的 origin_device。这样原始创建者始终可追溯，跨设备 merge 不会丢
+/// provenance。
 pub fn merge_memories(local: Vec<Memory>, remote: Vec<Memory>) -> Vec<Memory> {
     let mut out: std::collections::BTreeMap<String, Memory> = std::collections::BTreeMap::new();
     for m in local {
         out.insert(m.id.clone(), m);
     }
     for r in remote {
-        match out.get(&r.id) {
-            Some(l) if updated_ts(l) > updated_ts(&r) => { /* local newer, keep */ }
-            _ => {
+        // Capture the existing local entry (if any) before we move `r`.
+        let local_pair = out.get(&r.id).map(|l| (updated_ts(l), l.created_at, l.origin_device.clone()));
+        match local_pair {
+            Some((lts, _, _)) if lts > updated_ts(&r) => {
+                // Local is newer on body. Patch origin: prefer non-NULL across
+                // both sides, then break ties by the OLDEST created_at. This
+                // handles the common case where remote re-stamped a memory that
+                // local had as NULL (reorigin + push) — the local copy
+                // should inherit the remote origin even though timestamps match.
+                let mut m = out.get(&r.id).unwrap().clone();
+                match (m.origin_device.as_ref(), r.origin_device.as_ref()) {
+                    (None, Some(r_dev)) => m.origin_device = Some(r_dev.clone()),
+                    (Some(_), None) => { /* keep local */ }
+                    (Some(l_dev), Some(r_dev)) => {
+                        // Both have origin: keep the OLDEST (first creator).
+                        if r.created_at < m.created_at {
+                            m.origin_device = Some(r_dev.clone());
+                        } else {
+                            let _ = l_dev;
+                        }
+                    }
+                    (None, None) => {}
+                }
+                out.insert(r.id.clone(), m);
+            }
+            Some((_, l_created_at, l_origin)) => {
+                // Remote is newer on body. Same origin-resolution rule: prefer
+                // non-NULL across both sides, then break ties by oldest.
+                let mut r = r;
+                match (l_origin.as_ref(), r.origin_device.as_ref()) {
+                    (Some(l_dev), None) => r.origin_device = Some(l_dev.clone()),
+                    (None, Some(_)) => { /* keep remote */ }
+                    (Some(l_dev), Some(_)) => {
+                        if r.created_at > l_created_at {
+                            r.origin_device = Some(l_dev.clone());
+                        } else {
+                            let _ = l_dev;
+                        }
+                    }
+                    (None, None) => {}
+                }
+                out.insert(r.id.clone(), r);
+            }
+            None => {
                 out.insert(r.id.clone(), r);
             }
         }
@@ -676,7 +721,16 @@ mod tests {
             claimed_by: None,
             parent_id: None,
             completed_at: None,
+            origin_device: None,
         }
+    }
+
+    /// Same as `mk` but with a device id and per-field created_at, so
+    /// we can exercise the origin-preservation branch in merge.
+    fn mk_dev(id: &str, content: &str, ts: i64, origin: Option<&str>) -> Memory {
+        let mut m = mk(id, content, ts);
+        m.origin_device = origin.map(String::from);
+        m
     }
 
     /// 逐条合并: 较新赢 + 并集 + 删除传播(push/pull 共用)。
@@ -723,6 +777,114 @@ mod tests {
         remote_del.deleted_at = Some(Store::ts_to_dt(400));
         let merged = merge_memories(vec![mk("b1", "alive", 100)], vec![remote_del]);
         assert!(merged[0].deleted_at.is_some(), "remote deletion (newer) wins");
+    }
+
+    // ── v1.6.2: origin_device preservation across merge ────────────────
+    //
+    // Rule: when both sides have origin_device set, the merged record
+    // keeps the OLDEST `created_at`'s origin_device. Older creation =>
+    // original creator. This is the design choice from the v1.6.2
+    // plan: content newer-wins (preserves recent edits) but origin
+    // is historical fact (preserves provenance).
+
+    #[test]
+    fn merge_keeps_origin_of_older_creator_when_local_is_newer() {
+        // Local: created at t=200, content "newer", origin = "mac"
+        // Remote: created at t=100, content "older", origin = "win"
+        // Local is newer on body; merge keeps local body but origin
+        // should come from the older-creator (remote = "win").
+        let local = vec![mk_dev("m1", "newer", 200, Some("mac"))];
+        let remote = vec![mk_dev("m1", "older", 100, Some("win"))];
+        let merged = merge_memories(local, remote);
+        assert_eq!(merged[0].content, "newer", "body newer wins");
+        assert_eq!(
+            merged[0].origin_device.as_deref(),
+            Some("win"),
+            "origin comes from the older creator (win created m1 first)"
+        );
+    }
+
+    #[test]
+    fn merge_keeps_origin_of_older_creator_when_remote_is_newer() {
+        // Local: created at t=100, origin = "mac"
+        // Remote: created at t=300, origin = "win"
+        // Remote is newer on body; merge takes remote body, but
+        // origin stays with the older creator ("mac").
+        let local = vec![mk_dev("m1", "old", 100, Some("mac"))];
+        let remote = vec![mk_dev("m1", "new", 300, Some("win"))];
+        let merged = merge_memories(local, remote);
+        assert_eq!(merged[0].content, "new", "body newer wins");
+        assert_eq!(
+            merged[0].origin_device.as_deref(),
+            Some("mac"),
+            "origin stays with the older creator (mac)"
+        );
+    }
+
+    #[test]
+    fn merge_preserves_origin_when_only_one_side_has_it() {
+        // Legacy v4 memory (no origin) gets synced from a device that
+        // already has the column. Local is older but no origin;
+        // remote is newer with origin = "win". Result: take newer
+        // body + the only origin we have ("win").
+        let local = vec![mk_dev("m1", "old", 100, None)];
+        let remote = vec![mk_dev("m1", "new", 300, Some("win"))];
+        let merged = merge_memories(local, remote);
+        assert_eq!(merged[0].content, "new");
+        assert_eq!(
+            merged[0].origin_device.as_deref(),
+            Some("win"),
+            "the only origin present (win) wins"
+        );
+    }
+
+    #[test]
+    fn merge_keeps_origin_when_both_sides_agree() {
+        // Both sides know the origin, both have it set to the same
+        // device. No change.
+        let local = vec![mk_dev("m1", "old", 100, Some("mac"))];
+        let remote = vec![mk_dev("m1", "new", 300, Some("mac"))];
+        let merged = merge_memories(local, remote);
+        assert_eq!(merged[0].origin_device.as_deref(), Some("mac"));
+    }
+
+    /// v1.6.2 hot-fix: when both sides have the SAME created_at (sync
+    /// round-trip of the same memory), the older-origin rule used to
+    /// silently keep the NULL on the local side. Real-world repro:
+    /// Mac adds a lesson (no origin yet), pushes, Win pulls → Win's
+    /// NULL origin persists. Mac then reorigins and pushes again →
+    /// Win pulls, but timestamps tie → origin still NULL on Win.
+    ///
+    /// New rule: prefer non-NULL across the two sides. The tie-break
+    /// on equal timestamps now resolves to "whichever side has origin
+    /// wins".
+    #[test]
+    fn merge_prefers_non_null_origin_on_tied_timestamps() {
+        // Same created_at on both sides. Local is NULL, remote has
+        // Mac's id (from reorigin). The merge result should pick up
+        // Mac's id, NOT keep the NULL.
+        let local = vec![mk_dev("m1", "content", 100, None)];
+        let remote = vec![mk_dev("m1", "content", 100, Some("mac-id"))];
+        let merged = merge_memories(local, remote);
+        assert_eq!(
+            merged[0].origin_device.as_deref(),
+            Some("mac-id"),
+            "non-NULL origin must win on tied timestamps"
+        );
+    }
+
+    /// v1.6.2 hot-fix: the inverse — local has origin, remote is NULL.
+    /// Local should win (we already know the provenance).
+    #[test]
+    fn merge_keeps_local_origin_when_remote_is_null() {
+        let local = vec![mk_dev("m1", "content", 100, Some("mac-id"))];
+        let remote = vec![mk_dev("m1", "content", 100, None)];
+        let merged = merge_memories(local, remote);
+        assert_eq!(
+            merged[0].origin_device.as_deref(),
+            Some("mac-id"),
+            "local origin must be preserved when remote is NULL"
+        );
     }
 
     /// Importing a snapshot from a newer schema_version is refused.

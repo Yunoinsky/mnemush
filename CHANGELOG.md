@@ -1,5 +1,88 @@
 # Changelog
 
+## v1.6.2 (2026-08-26)
+
+### Added
+
+**跨设备 sync provenance (device origin)。** 跨设备 sync 补上"哪条记忆是谁
+设备创建的"这一信息。
+
+- **新字段 `origin_device: Option<String>`** 加到 `Memory` struct。同步导出
+  / 导入走 JSON 自动带上。
+- **设备标识**：每个 install 首次运行生成 UUID v4 存到 `~/.mnemush/device_id`。
+  可选人类可读名存到 `~/.mnemush/device_name`，默认从 `HOSTNAME` /
+  `COMPUTERNAME` env 取。`mnemush device [NAME]` 查看 / 重命名。
+- **Schema migration v4 → v5**：`ALTER TABLE memory ADD COLUMN origin_device TEXT`。
+  默认 NULL（迁移前创建的记录是 NULL）。
+- **`MemoryApi::add`**：新插入的记忆自动 `origin_device = local_device_id()`。
+- **`merge_memories` provenance 规则**：body 仍是较新者赢（保留最新编辑），
+  但 `origin_device` 单独走 **较旧 `created_at` 赢**（保留原始创建者）。
+  历史事实 ≠ 同步最新编辑，两个目标分两段代码。
+- **新命令 `mnemush memory reorigin --local|--device <id>`**：把 NULL 行
+  bulk 改成指定 device id。在已知所有历史数据来自哪台机器的那台机器上
+  跑一次即可。**Mac 端**：创建过的数据 → 跑 `reorigin --local` → 推 → Win
+  端拉到 → 全部带 Mac origin。
+- **新命令 `mnemush device [NAME]`**：查看 / 重命名本机身份。
+- **`mnemush status`** 加 per-origin 计数：
+  `by origin : <local-hostname>(278), unknown(5)`。
+- **`mnemush memory list --origin <id|name|local>`** 按来源过滤。
+- **`mnemush webdav-safety-check`** (v1.6.1 已有)：用 XOR-masked needle
+  在 current_exe + PATH 上自检，防止 pre-edef25b stale binary 走自动同步。
+
+### Migration
+
+- 旧 DB 跑一次 mnemush 命令即自动跑 v4→v5（幂等）。迁移后
+  `origin_device` 都是 NULL，需要在已知来源的机器上跑 `reorigin`
+  补填。
+- 已用 SQLite 备份额外保护 (在 `~/.mnemush/` data 目录操作前
+  应先 `mnemush backup` 拍快照)。
+
+### Recovery
+
+- `mnemush restore --input <backup>` 完整回滚 data 目录。
+- 任何迁移 / 数据问题可还原。
+
+## v1.6.1 (2026-08-26)
+
+### Added
+
+**Dream 机制三件事：本地模型 + 速度 + 2am 守护进程。**
+
+- **本地模型支持 (llm.rs)。** 新增 OpenAI 兼容的本地 provider（Ollama / LM Studio / llama.cpp）。
+  配置 `[llm] provider = "local"` 或 `MNEMUSH_LLM_PROVIDER=local` 走 `localhost:11434`。
+  默认模型 `qwen3.8:27b-q4_K_M`。`provider = "auto"` 按 MiniMax → Local → DeepSeek
+  顺序走（每个 step 失败自动 fallback 到下一个）。
+  本地 provider 不发 `frequency_penalty` / `presence_penalty`（某些 server 会拒绝），
+  `max_tokens` 压到 8192（本地模型吃不下 65536）。云端 provider 保留原有的 looping
+  mitigations（MiniMax-M3 #20 #7 缓解参数仍按原配置发）。
+- **Dream 速度。** 默认走 MiniMax M3（10K token prompt 10s ），需要更快/更省可以将
+  `[dream] provider = "local"`（4K token prompt 25s 完事、0 费用、4090 上限）。
+  `MNEMUSH_DREAM_MODEL` 可覆盖 Ollama 端的模型名。
+- **Dream 守护进程 (`mnemush daemon`)。** 新增 long-running 子命令：
+  计算下次 2am 距离 → 慢点 sleep 60s 循环 → 检查 daily_token_budget →
+  spawn `mnemush dream`。单实例锁（`<data_dir>/daemon.pid` + `OpenProcess` 检查
+  PID 存活）。Started/completed 状态文件拆开写（崩在中间下次重试，不跳过）。
+  `MNEMUSH_DREAM_ENABLED=1` 或 `[dream] enabled = true` 才启动。
+  `mnemush daemon --dry-run` 打印下次唤醒时间 + token 预算状态。
+- **Etype 漂移告警。** Dream prompt 显式枚举 4 个 etype 值
+  （`related | supports | contradicts | supersedes`），系统对未知 etype
+  强制降为 `related` 并往 `stats.warnings` 记一条；dream 输出新增
+  `! <warning>` 行。本地 Qwen 偶尔发明的 `sequential` / `temporal` 等同义词
+  不再静默丢边（之前是静默降为 `related`，现在有告警可见）。
+
+### Changed
+
+- 配置新增 `[llm]` 和 `[dream]` 段 + `MNEMUSH_LLM_*` / `MNEMUSH_DREAM_*` env。
+- 旧 `dream.model_override` 字段替换为 `dream.provider`（更明确：单 provider
+  vs chain 走）。
+
+### Fixed
+
+- Stale 安装版二进制边丢失事件 (edef25b 修复) —— `~/.cargo/bin/mnemush` 的
+  pre-edef25b 编译产物不再被 PATH 优先选中。运行 `cargo install --path crates/mnemush --force`
+  同步 PATH 中二进制到源。验证：`grep -c "DELETE FROM memory WHERE id" ~/.cargo/bin/mnemush`
+  从 2 降到 1。
+
 ## v1.6.0 (2026-08-21)
 
 ### Added

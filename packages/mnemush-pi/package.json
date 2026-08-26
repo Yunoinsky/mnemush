@@ -1,6 +1,6 @@
 {
   "name": "mnemush-pi",
-  "version": "1.6.0",
+  "version": "1.6.2",
   "description": "Mnemush memory extension for the Pi coding agent.",
   "type": "module",
   "main": "./dist/index.js",

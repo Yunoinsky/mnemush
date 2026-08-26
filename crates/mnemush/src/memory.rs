@@ -141,6 +141,8 @@ impl<'a> MemoryApi<'a> {
             claimed_by: None,
             parent_id: None,
             completed_at: None,
+            // v1.6.2: stamp the local device id so the origin survives sync.
+            origin_device: Some(crate::device::local_device_id()),
         };
 
         let tx = self.store.conn.unchecked_transaction()?;
@@ -1294,6 +1296,7 @@ mod tests {
             claimed_by: None,
             parent_id: None,
             completed_at: None,
+            origin_device: None,
         };
         let tx = store.conn.unchecked_transaction().unwrap();
         Store::insert_memory_tx(&tx, &m).unwrap();

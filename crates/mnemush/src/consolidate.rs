@@ -6,6 +6,7 @@
 //! `dream`(is_dream=true)全量扫描、忽略位置、遗忘强度更高,且不推进位置。
 
 use crate::error::Result;
+use crate::llm::{LlmUsage, Provider, ProviderKind};
 use crate::memory::MemoryApi;
 use crate::schema::{Category, EdgeType, Memory, MemoryType, NewMemory, Source};
 
@@ -161,6 +162,10 @@ pub struct ExecStats {
     pub forgot: usize,
     pub neuropilized: usize,
     pub errors: Vec<String>,
+    /// Non-fatal warnings (e.g. etype coercion, skipped memories).
+    /// Surfaced to the user as `!` lines in dream output so they notice
+    /// when the LLM drifted from the prompt's enum constraints.
+    pub warnings: Vec<String>,
 }
 
 /// 把 LLM 输出的短 id(前 8 字符或完整)解析为完整 UUID。
@@ -272,18 +277,36 @@ fn run_one(api: &MemoryApi, action: &Action, stats: &mut ExecStats) -> Result<()
             etype,
             strength,
         } => {
-            let et = match etype.as_str() {
-                "supports" | "caused" | "enables" | "evidence_for" | "summarized_by"
-                | "extends" | "depends_on" => EdgeType::Supports,
-                "contradicts" | "conflicts" => EdgeType::Contradicts,
-                "supersedes" | "replaces" => EdgeType::Supersedes,
-                _ => EdgeType::Related,
+            // Strict enum: only the 4 standard etypes are accepted as-is.
+            // Synonyms coerce to their canonical type with a warning. Truly
+            // unknown etypes coerce to `related` and surface a warning so
+            // the user notices when the model drifted (e.g. local Qwen
+            // invented "sequential"). v1.6.1.
+            let canonical: &[&str] = &["related", "supports", "contradicts", "supersedes"];
+            let (et, coerced_from) = match etype.as_str() {
+                "related" => (EdgeType::Related, None),
+                "supports" => (EdgeType::Supports, None),
+                "contradicts" => (EdgeType::Contradicts, None),
+                "supersedes" => (EdgeType::Supersedes, None),
+                "caused" | "enables" | "evidence_for" | "summarized_by"
+                | "extends" | "depends_on" => (EdgeType::Supports, Some(etype.clone())),
+                "conflicts" => (EdgeType::Contradicts, Some(etype.clone())),
+                "replaces" => (EdgeType::Supersedes, Some(etype.clone())),
+                other => {
+                    if !canonical.contains(&other) && !other.is_empty() {
+                        stats.warnings.push(format!(
+                            "link {source}→{target}: unknown etype {other:?} coerced to \"related\""
+                        ));
+                    }
+                    (EdgeType::Related, None)
+                }
             };
             let (Some(sf), Some(tf)) = (resolve_id(api, source), resolve_id(api, target)) else {
                 return Ok(());
             };
             edge_api.link(&sf, &tf, et, *strength, Some("consolidate:link"), None)?;
             stats.links += 1;
+            let _ = coerced_from;
         }
         Action::Merge { keep, absorb } => {
             let (Some(kf), Some(af)) = (resolve_id(api, keep), resolve_id(api, absorb)) else {
@@ -649,6 +672,79 @@ pub fn collect_dream_candidates(api: &MemoryApi, m: usize) -> Result<Vec<crate::
     Ok(cands)
 }
 
+/// Chat through the provider chain. Honors `[dream] model_override` so a
+/// user can pin dream to local Qwen (or any specific model) without
+/// Resolve which LLM provider(s) dream uses. Honors `[dream] provider`:
+///   - "minimax" / "deepseek" / "local" → a single-provider chain (no fallback)
+///   - "auto"                         → walk the LLM chain (MiniMax → Local → DeepSeek)
+/// For "local" we read `MNEMUSH_DREAM_MODEL` (env) to choose the specific
+/// Ollama model; falls back to `cfg.llm.local_model`.
+fn dream_providers(cfg: &crate::config::Config) -> Vec<Provider> {
+    let model_override = std::env::var("MNEMUSH_DREAM_MODEL")
+        .ok()
+        .filter(|s| !s.is_empty());
+    match cfg.dream.provider.as_str() {
+        "minimax" => vec![Provider {
+            name: "minimax".into(),
+            base_url: crate::llm::MINIMAX_CHAT_URL.into(),
+            model: crate::llm::minimax_model(),
+            api_key: crate::llm::minimax_key(),
+            kind: ProviderKind::MiniMax,
+        }],
+        "deepseek" => vec![Provider {
+            name: "deepseek".into(),
+            base_url: crate::llm::DEEPSEEK_CHAT_URL.into(),
+            model: crate::llm::deepseek_model(),
+            api_key: std::env::var("DEEPSEEK_API_KEY").ok(),
+            kind: ProviderKind::DeepSeek,
+        }],
+        "local" => {
+            let model = model_override.unwrap_or_else(|| cfg.llm.local_model.clone());
+            vec![Provider {
+                name: "local".into(),
+                base_url: cfg.llm.local_base_url.clone(),
+                model,
+                api_key: if cfg.llm.local_api_key.is_empty() {
+                    None
+                } else {
+                    Some(cfg.llm.local_api_key.clone())
+                },
+                kind: ProviderKind::Local,
+            }]
+        }
+        // "auto" — walk the LLM chain. Local model is also taken from the
+        // dream env var if set, so the local step in the chain uses the
+        // user's chosen model rather than the global default.
+        _ => {
+            let mut chain = crate::llm::provider_chain(cfg);
+            if let Some(m) = model_override {
+                if let Some(p) = chain.iter_mut().find(|p| p.kind == ProviderKind::Local) {
+                    p.model = m;
+                }
+            }
+            chain
+        }
+    }
+}
+
+fn chat_through_chain(prompt: &[crate::llm::ChatMsg], cfg: &crate::config::Config) -> Result<(String, LlmUsage)> {
+    let providers = dream_providers(cfg);
+    chat_with_providers(&providers, prompt)
+}
+
+fn chat_with_providers(providers: &[Provider], prompt: &[crate::llm::ChatMsg]) -> Result<(String, LlmUsage)> {
+    let mut last: Option<crate::error::MnemushError> = None;
+    for p in providers {
+        match crate::llm::chat_with_provider(p, prompt) {
+            Ok(r) => return Ok(r),
+            Err(e) => last = Some(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| {
+        crate::error::MnemushError::Other("llm: empty provider list".into())
+    }))
+}
+
 /// 组装 prompt: 系统提示(巩固+遗忘指令/双阈值/保护规则/schema)+ 候选。
 pub fn build_prompt(cands: &[Memory], is_dream: bool) -> Vec<crate::llm::ChatMsg> {
     let mut items = String::new();
@@ -666,7 +762,7 @@ pub fn build_prompt(cands: &[Memory], is_dream: bool) -> Vec<crate::llm::ChatMsg
         ));
     }
     let sys = format!(
-        "你是记忆库巩固者。分析以下候选记忆,输出 JSON 动作列表。\n         巩固: update({{id,content,reason}}) 修订内容; link({{source,target,etype,strength}}) source指向target 建边, source和target都是候选id; merge({{keep,absorb}}) 重复记忆合并; insight({{title,content,links}}) 发现跨簇新模式, 创建顿悟记忆; neuropilize({{id,path}}) 将可结构化记忆归档到文件树(主库留摘要入口), 仅限 category=note/skill 且非重要记忆。\n         主动遗忘: decay(降权, 原因: 干扰|过时|冗余)/ forget(软删, 原因: 过时|冗余|被取代|干扰)。\n         双阈值: confidence<0.4 的记忆低证据即可遗忘; confidence>=0.4 需明确矛盾/过时证据。\n         保护规则: importance>=0.7 / never_prune / identity / 7 天内创建 → 禁止 decay/forget, 只能 update 或标 contradicts。\n         动作 type 只能是: update/link/merge/insight/decay/forget/neuropilize(delete 等同 forget)。\n         所有 id(source/target/keep/absorb/links)必须原样使用候选列表中的完整 id, 不可截断。\n         输出严格 JSON, 示例: {{\"actions\":[{{\"type\":\"update\",\"id\":\"019fda8e-1111-2222-3333-444455556666\",\"content\":\"新内容\",\"reason\":\"过时\"}},{{\"type\":\"link\",\"source\":\"019fda8e-1111-2222-3333-444455556666\",\"target\":\"019fda8f-aaaa-bbbb-cccc-ddddeeeeffff\",\"etype\":\"related\",\"strength\":0.6}},{{\"type\":\"decay\",\"id\":\"019fda90-1111-2222-3333-444455556666\",\"factor\":0.5,\"reason\":\"过时\"}}]}}. 不要 markdown 代码块。不要重复动作, 不要循环, 每条记忆最多一个动作, 直接输出 JSON。\n         遗忘强度: {}\n\n候选记忆:\n{}",
+        "你是记忆库巩固者。分析以下候选记忆,输出 JSON 动作列表。\n         巩固: update({{id,content,reason}}) 修订内容; link({{source,target,etype,strength}}) source指向target 建边, source和target都是候选id; merge({{keep,absorb}}) 重复记忆合并; insight({{title,content,links}}) 发现跨簇新模式, 创建顿悟记忆; neuropilize({{id,path}}) 将可结构化记忆归档到文件树(主库留摘要入口), 仅限 category=note/skill 且非重要记忆。\n         主动遗忘: decay(降权, 原因: 干扰|过时|冗余)/ forget(软删, 原因: 过时|冗余|被取代|干扰)。\n         双阈值: confidence<0.4 的记忆低证据即可遗忘; confidence>=0.4 需明确矛盾/过时证据。\n         保护规则: importance>=0.7 / never_prune / identity / 7 天内创建 → 禁止 decay/forget, 只能 update 或标 contradicts。\n         动作 type 只能是: update/link/merge/insight/decay/forget/neuropilize(delete 等同 forget)。\n         link 动作的 etype 字段必须严格使用以下 4 个值之一: \"related\" | \"supports\" | \"contradicts\" | \"supersedes\"。系统会自动将任何其他值(如同义词 sequential / temporal / follows / depends_on)强制降为 \"related\" 并在告警中报告。请勿使用同义词。\n         所有 id(source/target/keep/absorb/links)必须原样使用候选列表中的完整 id, 不可截断。\n         输出严格 JSON, 示例: {{\"actions\":[{{\"type\":\"update\",\"id\":\"019fda8e-1111-2222-3333-444455556666\",\"content\":\"新内容\",\"reason\":\"过时\"}},{{\"type\":\"link\",\"source\":\"019fda8e-1111-2222-3333-444455556666\",\"target\":\"019fda8f-aaaa-bbbb-cccc-ddddeeeeffff\",\"etype\":\"related\",\"strength\":0.6}},{{\"type\":\"decay\",\"id\":\"019fda90-1111-2222-3333-444455556666\",\"factor\":0.5,\"reason\":\"过时\"}}]}}. 不要 markdown 代码块。不要重复动作, 不要循环, 每条记忆最多一个动作, 直接输出 JSON。\n         遗忘强度: {}\n\n候选记忆:\n{}",
         if is_dream { "高(睡眠期巩固高峰, 可更激进)" } else { "中" },
         items,
     );
@@ -713,8 +809,39 @@ pub fn run_consolidate(api: &MemoryApi, opts: &RunOpts) -> Result<(ExecStats, us
     if cands.is_empty() {
         return Ok((ExecStats::default(), 0));
     }
-    let prompt = build_prompt(&cands, opts.dream);
-    let (raw, usage) = crate::llm::chat_with_usage(&prompt)?;
+    // Build the prompt + chat with the candidates. Chunking is opt-in via
+    // `[dream] chunked = true` (or `MNEMUSH_DREAM_CHUNKED=1`). When off
+    // (default), all candidates go in one prompt so cross-batch
+    // link/merge/insight actions stay coherent.
+    let mut total_usage = LlmUsage::default();
+    let mut all_actions_raw = String::new();
+    if opts.dream && api.config.dream.chunked && cands.len() > api.config.dream.chunk_size {
+        let cs = api.config.dream.chunk_size.max(1);
+        let mut idx = 0;
+        while idx < cands.len() {
+            let end = (idx + cs).min(cands.len());
+            let chunk = &cands[idx..end];
+            let prompt = build_prompt(chunk, true);
+            let (raw, usage) = chat_through_chain(&prompt, &api.config)?;
+            total_usage.prompt_tokens += usage.prompt_tokens;
+            total_usage.completion_tokens += usage.completion_tokens;
+            total_usage.reasoning_tokens += usage.reasoning_tokens;
+            if !all_actions_raw.is_empty() {
+                all_actions_raw.push('\n');
+            }
+            all_actions_raw.push_str(&raw);
+            idx = end;
+        }
+    } else {
+        let prompt = build_prompt(&cands, opts.dream);
+        let (raw, usage) = chat_through_chain(&prompt, &api.config)?;
+        total_usage.prompt_tokens = usage.prompt_tokens;
+        total_usage.completion_tokens = usage.completion_tokens;
+        total_usage.reasoning_tokens = usage.reasoning_tokens;
+        all_actions_raw = raw;
+    }
+    let usage = total_usage;
+    let raw = all_actions_raw;
     // 存档原始响应 + 用量(可追溯/成本核算)
     let _ = std::fs::create_dir_all(crate::default_data_dir().join("eval"));
     let _ = std::fs::write(
@@ -825,6 +952,53 @@ mod tests {
             Action::Update { .. } => {}
             _ => panic!("expected update"),
         }
+    }
+
+    /// v1.6.1: when the LLM returns a non-canonical etype, execute() should
+    /// coerce it to `related` and surface a warning so the user notices
+    /// the model drifted. Local Qwen 3.8 has been observed returning
+    /// "sequential" / "temporal" — those are noise, not data loss.
+    #[test]
+    fn link_unknown_etype_coerces_and_warns() {
+        let (store, cfg) = test_store();
+        let api = MemoryApi::new(&store, &cfg);
+        let a = add(&api, "alpha", 0.3);
+        let b = add(&api, "beta", 0.3);
+        let s = execute(
+            &api,
+            &[Action::Link {
+                source: a,
+                target: b,
+                etype: "sequential".into(),
+                strength: 0.5,
+            }],
+        )
+        .unwrap();
+        assert_eq!(s.links, 1, "link should be created (coerced, not dropped)");
+        assert_eq!(s.warnings.len(), 1, "unknown etype should produce a warning");
+        assert!(s.warnings[0].contains("sequential"));
+        assert!(s.warnings[0].contains("related"));
+    }
+
+    /// Canonical etypes should NOT trigger a warning.
+    #[test]
+    fn link_canonical_etype_no_warning() {
+        let (store, cfg) = test_store();
+        let api = MemoryApi::new(&store, &cfg);
+        let a = add(&api, "alpha", 0.3);
+        let b = add(&api, "beta", 0.3);
+        let s = execute(
+            &api,
+            &[Action::Link {
+                source: a,
+                target: b,
+                etype: "related".into(),
+                strength: 0.5,
+            }],
+        )
+        .unwrap();
+        assert_eq!(s.links, 1);
+        assert_eq!(s.warnings.len(), 0);
     }
 
     #[test]

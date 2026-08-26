@@ -548,6 +548,7 @@ mod tests {
             claimed_by: None,
             parent_id: None,
             completed_at: None,
+            origin_device: None,
         }
     }
 

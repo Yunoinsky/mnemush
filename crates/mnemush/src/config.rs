@@ -24,6 +24,83 @@ pub struct Config {
     pub project: ProjectConfig,
     pub capacity: CapacityConfig,
     pub sync: SyncConfig,
+    pub llm: LlmConfig,
+    pub dream: DreamConfig,
+}
+
+/// LLM provider configuration (v1.6.1). All entries are optional;
+/// provider chain auto-detects what's reachable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LlmConfig {
+    /// Provider selection. "auto" walks the chain in order; explicit
+    /// names force one provider and fail loudly if unavailable.
+    pub provider: String,
+    /// OpenAI-compatible base URL for the local provider (Ollama, LM Studio, llama.cpp).
+    pub local_base_url: String,
+    /// Local model name as served by the OpenAI-compatible endpoint.
+    pub local_model: String,
+    /// Optional API key for the local provider. Ollama ignores it; LM Studio
+    /// accepts any non-empty string when running with auth on.
+    pub local_api_key: String,
+    /// Whether to fall back from the primary provider to local on any error.
+    /// When false, a provider error (other than quota) is fatal.
+    pub fallback_to_local: bool,
+}
+
+impl Default for LlmConfig {
+    fn default() -> Self {
+        Self {
+            provider: "auto".to_string(),
+            local_base_url: "http://localhost:11434/v1".to_string(),
+            local_model: "qwen3.8:27b-q4_K_M".to_string(),
+            local_api_key: String::new(),
+            fallback_to_local: true,
+        }
+    }
+}
+
+/// Dream scheduler / consolidation behavior (v1.6.1).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DreamConfig {
+    /// Master switch for the scheduled dream daemon. When false, the
+    /// `mnemush dream` CLI and the session-driven hook still work;
+    /// only the 2am daemon is gated.
+    pub enabled: bool,
+    /// Daily wake-up time (24h, local timezone unless `timezone` set).
+    pub scheduled_time: String,
+    /// IANA timezone name for `scheduled_time`. Empty = system local.
+    pub timezone: String,
+    /// Token budget per day. The daemon skips dream if today's
+    /// recorded LLM tokens already exceed this. Local models are
+    /// "free" so we still run if local is the only path.
+    pub daily_token_budget: u64,
+    /// Provider for dream. `minimax` (default) pins dream to MiniMax M3;
+    /// `local` / `deepseek` / `auto` pick a specific or chain-walked
+    /// provider. Use the auto chain when cost is a concern; pin to
+    /// MiniMax when you want stable etype discipline.
+    pub provider: String,
+    /// Whether to chunk candidates into smaller prompts. Off by default
+    /// to preserve cross-batch link/merge/insight actions; turn on for
+    /// smaller, faster prompts at the cost of those actions.
+    pub chunked: bool,
+    /// Candidates per chunk when `chunked = true`.
+    pub chunk_size: usize,
+}
+
+impl Default for DreamConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scheduled_time: "02:00".to_string(),
+            timezone: String::new(),
+            daily_token_budget: 500_000,
+            provider: "minimax".to_string(),
+            chunked: false,
+            chunk_size: 10,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -383,7 +460,41 @@ impl Config {
                 "eval.max_session_files must be > 0".into(),
             ));
         }
+        // ── v1.6.1 dream / llm ─────────────────────────────────────────
+        // Provider name must be one of the known values (auto = chain walk).
+        if let Err(e) = cfg_field_provider(&self.llm) {
+            return Err(MnemushError::Config(e));
+        }
+        if let Err(e) = cfg_field_dream_provider(&self.dream) {
+            return Err(MnemushError::Config(e));
+        }
+        if self.dream.chunk_size == 0 {
+            return Err(MnemushError::Config(
+                "dream.chunk_size must be > 0".into(),
+            ));
+        }
+        if self.dream.scheduled_time.len() != 5
+            || self.dream.scheduled_time.as_bytes().get(2) != Some(&b':')
+        {
+            return Err(MnemushError::Config(
+                "dream.scheduled_time must be HH:MM".into(),
+            ));
+        }
         Ok(())
+    }
+}
+
+fn cfg_field_provider(llm: &LlmConfig) -> std::result::Result<(), String> {
+    match llm.provider.as_str() {
+        "auto" | "minimax" | "deepseek" | "local" => Ok(()),
+        other => Err(format!("llm.provider must be one of auto|minimax|deepseek|local, got: {other}")),
+    }
+}
+
+fn cfg_field_dream_provider(dream: &DreamConfig) -> std::result::Result<(), String> {
+    match dream.provider.as_str() {
+        "auto" | "minimax" | "deepseek" | "local" => Ok(()),
+        other => Err(format!("dream.provider must be one of auto|minimax|deepseek|local, got: {other}")),
     }
 }
 
@@ -429,6 +540,65 @@ fn apply_env_overrides(cfg: &mut Config) {
             cfg.project.cross_project_search = b;
         } else if v == "1" {
             cfg.project.cross_project_search = true;
+        }
+    }
+    // ── LLM provider (v1.6.1) ─────────────────────────────────────────
+    if let Ok(v) = std::env::var("MNEMUSH_LLM_PROVIDER") {
+        if !v.is_empty() {
+            cfg.llm.provider = v;
+        }
+    }
+    if let Ok(v) = std::env::var("MNEMUSH_LLM_BASE_URL") {
+        if !v.is_empty() {
+            cfg.llm.local_base_url = v;
+        }
+    }
+    if let Ok(v) = std::env::var("MNEMUSH_LLM_MODEL") {
+        if !v.is_empty() {
+            cfg.llm.local_model = v;
+        }
+    }
+    if let Ok(v) = std::env::var("MNEMUSH_LLM_API_KEY") {
+        cfg.llm.local_api_key = v;
+    }
+    if let Ok(v) = std::env::var("MNEMUSH_LLM_NO_FALLBACK") {
+        if let Ok(b) = v.parse::<bool>() {
+            cfg.llm.fallback_to_local = !b;
+        } else if v == "1" {
+            cfg.llm.fallback_to_local = false;
+        }
+    }
+    // ── Dream daemon (v1.6.1) ─────────────────────────────────────────
+    if let Ok(v) = std::env::var("MNEMUSH_DREAM_ENABLED") {
+        if let Ok(b) = v.parse::<bool>() {
+            cfg.dream.enabled = b;
+        } else if v == "1" {
+            cfg.dream.enabled = true;
+        }
+    }
+    if let Ok(v) = std::env::var("MNEMUSH_DREAM_TIME") {
+        if !v.is_empty() {
+            cfg.dream.scheduled_time = v;
+        }
+    }
+    if let Ok(v) = std::env::var("MNEMUSH_DREAM_TIMEZONE") {
+        cfg.dream.timezone = v;
+    }
+    if let Ok(v) = std::env::var("MNEMUSH_DREAM_TOKEN_BUDGET") {
+        if let Ok(n) = v.parse::<u64>() {
+            cfg.dream.daily_token_budget = n;
+        }
+    }
+    if let Ok(v) = std::env::var("MNEMUSH_DREAM_PROVIDER") {
+        if !v.is_empty() {
+            cfg.dream.provider = v;
+        }
+    }
+    if let Ok(v) = std::env::var("MNEMUSH_DREAM_CHUNKED") {
+        if let Ok(b) = v.parse::<bool>() {
+            cfg.dream.chunked = b;
+        } else if v == "1" {
+            cfg.dream.chunked = true;
         }
     }
 }

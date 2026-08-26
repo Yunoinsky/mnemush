@@ -87,6 +87,21 @@ enum Cmd {
         #[arg(long)]
         suggest: bool,
     },
+    /// Run the dream scheduler daemon (v1.6.1). Long-running; wakes
+    /// at `[dream] scheduled_time` (default 02:00 local), checks the
+    /// daily token budget, then spawns `mnemush dream`. Single-instance
+    /// via `<data_dir>/daemon.pid`. Configure `[dream]` in
+    /// `~/.mnemush/config.toml` or via env (`MNEMUSH_DREAM_*`).
+    Daemon {
+        /// Dry-run: print next wake time + gate status, then exit.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// v1.6.1: scan the running binary + PATH siblings for the
+    /// pre-edef25b FK-cascade pattern. Exits 0 if all binaries are
+    /// safe, 1 if any are stale. Use this to verify auto-sync is
+    /// safe to re-enable after a `cargo install`.
+    WebdavSafetyCheck,
     /// List top concepts (memory index) for agent priming.
     Concepts {
         #[arg(long, default_value_t = 40)]
@@ -132,6 +147,11 @@ enum Cmd {
         /// Bypass MNEMUSH_PROJECT isolation and list every project.
         #[arg(long)]
         all_projects: bool,
+        /// v1.6.2: filter to memories whose `origin_device` matches this
+        /// device id (full UUID) or name (substring match). Combine
+        /// with `all_projects` for unscoped listing.
+        #[arg(long)]
+        origin: Option<String>,
     },
     /// Soft-delete a memory.
     Delete { id: String },
@@ -157,6 +177,18 @@ enum Cmd {
         /// Min days since last access for --isolate candidates.
         #[arg(long, default_value_t = 30)]
         min_days_no_access: i64,
+    },
+    /// v1.6.2: backfill the `origin_device` column for memories that
+    /// predate the v4→v5 migration. Stamps NULL rows with a chosen
+    /// device id. Use once on the machine that originally created
+    /// the data, before any cross-device pull.
+    ///   `mnemush memory reorigin --local`   — stamp with this device's id.
+    ///   `mnemush memory reorigin --device ID` — stamp with an explicit id.
+    MemoryReorigin {
+        #[arg(long)]
+        local: bool,
+        #[arg(long, conflicts_with = "local")]
+        device: Option<String>,
     },
     /// Show stats.
     Stats,
@@ -241,6 +273,13 @@ enum Cmd {
         /// Include the eval/ NDJSON log (regenerable, default off).
         #[arg(long)]
         include_eval: bool,
+    },
+    /// v1.6.2: show this device's identity. With a positional `NAME`,
+    /// rename this device instead. e.g. `mnemush device` (show),
+    /// `mnemush device macbook-air-5` (rename).
+    Device {
+        /// Optional new name. If omitted, prints current identity.
+        name: Option<String>,
     },
     /// Embed all (or selected) memories with the configured model.
     /// Requires `[embeddings] enabled = true`. First run downloads
@@ -513,13 +552,115 @@ fn main() -> anyhow::Result<()> {
             let (s, n) = mnemush::consolidate::run_consolidate(&api, &opts)?;
             if !dry_run && !suggest {
                 println!(
-                    "dream: {n} candidates | +{} updated, +{} links, +{} merged, +{} insight, -{} decayed, -{} forgot, {} neuropilized | {} error(s)",
-                    s.updated, s.links, s.merged, s.insights, s.decayed, s.forgot, s.neuropilized, s.errors.len()
+                    "dream: {n} candidates | +{} updated, +{} links, +{} merged, +{} insight, -{} decayed, -{} forgot, {} neuropilized | {} error(s), {} warning(s)",
+                    s.updated, s.links, s.merged, s.insights, s.decayed, s.forgot, s.neuropilized, s.errors.len(), s.warnings.len()
                 );
                 for e in &s.errors {
                     println!("  ⚠ {e}");
                 }
+                for w in &s.warnings {
+                    println!("  ! {w}");
+                }
             }
+        }
+        Cmd::Daemon { dry_run } => {
+            if dry_run {
+                let now = chrono::Local::now();
+                let next = mnemush::daemon::next_wake(now, &config.dream.scheduled_time).unwrap_or(now);
+                let used = mnemush::daemon::todays_tokens(&mnemush::default_data_dir());
+                println!("dry-run:");
+                println!("  now            = {}", now.format("%Y-%m-%d %H:%M:%S"));
+                println!("  next_wake      = {}", next.format("%Y-%m-%d %H:%M:%S"));
+                println!("  scheduled_time = {}", config.dream.scheduled_time);
+                println!("  daily_token_budget = {}", config.dream.daily_token_budget);
+                println!("  tokens_used_today   = {used}");
+                println!("  provider = {}", config.dream.provider);
+                println!("  chunked        = {}", config.dream.chunked);
+                return Ok(());
+            }
+            mnemush::daemon::run(&config)?;
+        }
+        Cmd::WebdavSafetyCheck => {
+            let issues = mnemush::webdav::binary_safety_diagnose();
+            if issues.is_empty() {
+                println!("ok: no stale binaries detected.");
+                println!("  (auto-sync safe to enable via [sync] webdav_enabled = true)");
+                std::process::exit(0);
+            } else {
+                println!("FAIL: stale binaries detected:");
+                for i in &issues {
+                    println!("  - {i}");
+                }
+                println!();
+                println!("Fix: cargo install --path crates/mnemush --force");
+                std::process::exit(1);
+            }
+        }
+        Cmd::Device { name } => {
+            if let Some(new_name) = name {
+                mnemush::device::set_device_name(&new_name)?;
+                println!("renamed to: {new_name}");
+                return Ok(());
+            }
+            let info = mnemush::device::current_device_info();
+            println!("device id   = {}", info.id);
+            println!("device name = {}", info.name);
+            println!("id file     = {}", info.id_path.display());
+            println!("name file   = {}", info.name_path.display());
+            // Per-origin breakdown so the user sees how many memories
+            // were created on this device vs others.
+            let conn = &store.conn;
+            let total_active: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM memory WHERE deleted_at IS NULL",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
+            let local_active: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM memory WHERE deleted_at IS NULL AND origin_device = ?1",
+                    rusqlite::params![&info.id],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
+            let null_origin: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM memory WHERE deleted_at IS NULL AND origin_device IS NULL",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
+            let other = total_active - local_active - null_origin;
+            println!();
+            println!("origin breakdown (active):");
+            println!("  {} (this device): {}", info.name, local_active);
+            if other > 0 {
+                println!("  other devices       : {other}");
+            }
+            if null_origin > 0 {
+                println!("  unknown (pre-v1.6.2): {null_origin}");
+                println!("  hint: `mnemush memory reorigin --local` to backfill");
+            }
+        }
+        Cmd::MemoryReorigin { local, device } => {
+            let target = if local {
+                Some(mnemush::device::local_device_id())
+            } else {
+                device.clone()
+            };
+            let target = match target {
+                Some(t) if !t.is_empty() => t,
+                _ => {
+                    eprintln!("error: specify --local or --device <id>");
+                    std::process::exit(2);
+                }
+            };
+            let n = store.conn.execute(
+                "UPDATE memory SET origin_device = ?1 WHERE origin_device IS NULL",
+                rusqlite::params![&target],
+            )?;
+            println!("reorigin: {n} memory rows stamped with origin_device = {target}");
         }
         Cmd::Concepts { limit, format } => {
             let api = MemoryApi::new(&store, &config);
@@ -620,6 +761,7 @@ fn main() -> anyhow::Result<()> {
             limit,
             category,
             all_projects,
+            origin,
         } => {
             let api = MemoryApi::new(&store, &config);
             // --all-projects bypasses MNEMUSH_PROJECT isolation; we
@@ -634,13 +776,36 @@ fn main() -> anyhow::Result<()> {
             if let Some(c) = category.as_deref().and_then(Category::parse) {
                 mems.retain(|m| m.category == c);
             }
+            // v1.6.2: --origin filter. Match against id (exact) or name
+            // (substring). Use `local` to mean this device's id.
+            if let Some(o) = origin.as_deref() {
+                let needle: String = if o == "local" {
+                    mnemush::device::local_device_id()
+                } else {
+                    o.to_string()
+                };
+                let local_id = mnemush::device::local_device_id();
+                let local_name = mnemush::device::local_device_name();
+                mems.retain(|m| {
+                    let dev = m.origin_device.as_deref().unwrap_or("");
+                    dev == needle
+                        || dev.starts_with(&needle)
+                        || (dev == local_id && (needle == local_name || needle == "local"))
+                });
+            }
             for m in mems {
+                let origin_tag = m
+                    .origin_device
+                    .as_deref()
+                    .map(|d| format!(" origin={}…", d.chars().take(8).collect::<String>()))
+                    .unwrap_or_else(|| " origin=unknown".to_string());
                 println!(
-                    "[{}] {} ({})  #{}",
+                    "[{}] {} ({})  #{}{}",
                     m.memory_type.as_str(),
                     m.title,
                     m.category.as_str(),
-                    &m.id[..8]
+                    &m.id[..8],
+                    origin_tag,
                 );
                 if m.status != mnemush::schema::ActionStatus::Active {
                     println!("      status: {}", m.status.as_str());
@@ -739,6 +904,54 @@ fn main() -> anyhow::Result<()> {
                     .unwrap_or(0);
             println!("mnemush status");
             println!("  memories (active):    {}", active);
+            // v1.6.2: per-origin breakdown. Group by origin_device, label
+            // the local device with the user's name, others by their id's
+            // first 8 chars (no central registry). NULL origin = pre-migration.
+            {
+                use rusqlite::params;
+                let local_id = mnemush::device::local_device_id();
+                let local_name = mnemush::device::local_device_name();
+                type Row = (Option<String>, i64);
+                let rows: Vec<Row> = (|| -> anyhow::Result<Vec<Row>> {
+                    let mut stmt = store.conn.prepare(
+                        "SELECT origin_device, COUNT(*) FROM memory \
+                         WHERE deleted_at IS NULL GROUP BY origin_device \
+                         ORDER BY 2 DESC",
+                    )?;
+                    let v: Vec<Row> = stmt
+                        .query_map(params![], |r| {
+                            Ok((r.get::<_, Option<String>>(0)?, r.get(1)?))
+                        })?
+                        .filter_map(|r| r.ok())
+                        .collect();
+                    Ok(v)
+                })()
+                .unwrap_or_default();
+                if !rows.is_empty() {
+                    print!("    by origin         : ");
+                    let mut parts: Vec<String> = Vec::new();
+                    let mut local_n: i64 = 0;
+                    let mut unknown_n: i64 = 0;
+                    let mut others: Vec<(String, i64)> = Vec::new();
+                    for (dev, n) in rows {
+                        match dev {
+                            None => unknown_n = n,
+                            Some(d) if d == local_id => local_n = n,
+                            Some(d) => others.push((d, n)),
+                        }
+                    }
+                    if local_n > 0 {
+                        parts.push(format!("{local_name}({local_n})"));
+                    }
+                    for (d, n) in others {
+                        parts.push(format!("{}…({n})", &d.chars().take(8).collect::<String>()));
+                    }
+                    if unknown_n > 0 {
+                        parts.push(format!("unknown({unknown_n})"));
+                    }
+                    println!("{}", parts.join(", "));
+                }
+            }
             println!("  memories (soft-del):  {}", soft_deleted);
             println!("  edges (active):       {}", edges);
             println!("  needs_review:         {}", needs_review);
