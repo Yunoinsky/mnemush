@@ -10,7 +10,7 @@ One index hub, many content trees — mirroring insect neurobiology:
 
 ```
              ┌──────────────────────────────────────┐
-             │ MUSHROOM_BODY (index layer, SQLite) │
+             │ MUSHROOM_BODY (index layer, SQLite)  │
              │  agent experience: full text +       │
              │  vectors + graph; summary entries    │
              │  (title+path); cross-cluster edges   │
@@ -23,7 +23,7 @@ One index hub, many content trees — mirroring insect neurobiology:
         │ = memory     │ │ = memory     │   │ = memory     │
         └──────────────┘ └──────────────┘   └──────────────┘
                  ▲              ▲              ▲
-                 └────── export-tree / neuropil 化 (摘要入口回写) ──────┘
+                 └────── export-tree / neuropilize (摘要入口回写) ──────┘
 ```
 
 - **mushroom_body** — one DB (SQLite + FTS5 + vectors) at the top. It's the single index/association hub: every neuropil's content is indexed here incrementally (`mnemush import-tree <dir> --project <name>`), and cross-cluster edges live here regardless of which neuropil the nodes came from. Retrieval, consolidation, and forgetting happen here.
@@ -51,7 +51,7 @@ One index hub, many content trees — mirroring insect neurobiology:
 
 **v1.6.0 (2026-08-21)** — WebDAV cross-device sync, automatic: memory writes (add/update/soft-delete) mark dirty, a background push fires 30s after the last write (debounced); disabled by default (`[sync] webdav_enabled=false`, enable via `MNEMUSH_WEBDAV_USER` / `MNEMUSH_WEBDAV_PASS`). Two-way merge (newer wins + union + deletion propagation) with ETag optimistic locking.
 
-**v1.5.0 (2026-08-14)** — DeepSeek Harness 插件: `mnemush-dsh` 原生 Cordis 插件, 16 个 memory 工具 + 概念表注入 + session 维护(与 Pi 插件同契约)。
+**v1.5.0 (2026-08-14)** — DeepSeek Harness plugin: `mnemush-dsh` native Cordis plugin, 16 memory tools + concept-table injection + session maintenance (same contract as Pi plugin).
 
 **v1.4.0 (2026-08-07)** — concept table (context priming index): `mnemush concepts` ranks top-N by importance×recency×access; Pi extension injects at session_start and refreshes on writes. Tells the agent what's retrievable (prefrontal retrieval cues).
 
