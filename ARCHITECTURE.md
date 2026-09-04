@@ -14,35 +14,46 @@ Mnemush is structured around three principles borrowed from human memory:
 
 ## Layers
 
-Three layers, mirroring insect neurobiology (v1.1+):
+Mnemush mirrors insect neurobiology (v1.1+): a single **mushroom_body** (index
+layer) that flexibly indexes **many neuropils** (content layer) — each neuropil
+is an independent file-system subtree, managed as a directory tree.
 
 ```
-┌─────────────────────────────────────────────────────┐
-│ IDENTITY (never decays, always injected)            │
-│  USER.md · PERSONA.md · CONSTITUTION.md            │
-└────────────────────┬────────────────────────────────┘
-                     │ influences
-                     ▼
-┌─────────────────────────────────────────────────────┐
-│ NEUROPILS (内容层, 文件树)                           │
-│  任意 markdown 目录树 = 记忆权威源                    │
-│  grep/cat/tree 直接读, Git 版本化                    │
-│  import-tree/export-tree 双向同步                    │
-└────────────────────┬────────────────────────────────┘
-         按需加载(import)│ neuropil 化(export + 摘要入口)
-                     ▼
-┌─────────────────────────────────────────────────────┐
-│ MUSHROOM_BODY (索引层, 主库 SQLite)                  │
-│  agent 经验: 全文 + 向量 + 边(常驻)                   │
-│  摘要入口: neuropil 化记忆留 title+摘要+路径           │
-│  wiki 动态索引: 按需局部加载(可再清)                  │
-│  跨簇关联边(related/supports/contradicts/supersedes) │
-│  巩固: consolidate/dream · 遗忘: decay/forget        │
-│  容量: 100MB 硬阈值驱逐链 + 冷归档                    │
-└─────────────────────────────────────────────────────┘
+             ┌─────────────────────────────────────────────────────┐
+             │ MUSHROOM_BODY (索引层, 主库 SQLite)                  │
+             │  agent 经验: 全文 + 向量 + 边(常驻)                   │
+             │  摘要入口: neuropil 化记忆留 title+摘要+路径           │
+             │  跨簇关联边(related/supports/contradicts/supersedes) │
+             │  巩固: consolidate/dream · 遗忘: decay/forget        │
+             │  容量: 100MB 硬阈值驱逐链 + 冷归档                    │
+             └──────┬──────────────────┬──────────────────┬────────┘
+                    │ import-tree       │ import-tree       │ ... (flexible, N trees)
+                    ▼                   ▼                   ▼
+        ┌──────────────────┐ ┌──────────────────┐   ┌──────────────────┐
+        │ NEUROPIL A       │ │ NEUROPIL B       │   │ NEUROPIL …       │
+        │ (文件树, 目录)   │ │ (文件树, 目录)   │   │ (文件树, 目录)   │
+        │ 任意 markdown    │ │ 任意 markdown    │   │ 任意 markdown    │
+        │ = 记忆权威源     │ │ = 记忆权威源     │   │ = 记忆权威源     │
+        │ grep/Git 直接读  │ │ grep/Git 直接读  │   │ grep/Git 直接读  │
+        └──────────────────┘ └──────────────────┘   └──────────────────┘
+             ▲                   ▲                       ▲
+             └─────── export-tree (neuropil 化, 摘要入口回写) ───────┘
 ```
 
-**大脑映射**:neuropils = 皮层(内容就地存储),mushroom_body = 海马/蘑菇体(索引 + 关联)。文件树与主库是同一记忆的两层:内容在文件树,索引在 mushroom_body,边跨两层维护。
+- **mushroom_body** — one DB (SQLite + FTS5 + vectors) sits at the top. It is
+the single index/association hub: every neuropil's content is indexed here
+(incrementally, via `import-tree --project <name>`), and cross-cluster edges
+live here regardless of which neuropil (or agent experience) the nodes came
+from.
+- **neuropils** — any number of independent directory trees, each a
+file-system-managed memory source (concepts, papers, knowledge bases, …).
+Files are the authoritative source: directly readable via grep/cat/tree,
+Git-versionable. The `…` in the diagram denotes an arbitrary N — add or remove
+a neuropil by importing/cleaning its tree, without touching the others.
+
+**大脑映射**: mushroom_body = 海马/蘑菇体(索引 + 关联, 一个中心); neuropils =
+皮层子脑区(内容就地存储, 多个, 文件系统层次管理)。内容在文件树, 索引在
+mushroom_body, 边跨多个 neuropil 与 agent 经验统一维护。
 
 ## Module map
 

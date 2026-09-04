@@ -6,21 +6,28 @@
 
 ## Architecture in one minute
 
-Two layers, mirroring insect neurobiology:
+One index hub, many content trees — mirroring insect neurobiology:
 
 ```
-┌──────────────────────────────┐      ┌──────────────────────────────┐
-│ NEUROPILS (content layer)    │      │ MUSHROOM_BODY (index layer)  │
-├──────────────────────────────┤      ├──────────────────────────────┤
-│ any markdown file tree       │      │ agent experience: full text  │
-│ = memory; authoritative      │      │ + vectors + graph;           │
-│ source (grep / Git)          │      │ summary entries (title+path) │
-└──────────────────────────────┘      └──────────────────────────────┘
-      import-tree ◄──────────────────────────► export + summary
+             ┌──────────────────────────────────────┐
+             │ MUSHROOM_BODY (index layer, SQLite) │
+             │  agent experience: full text +       │
+             │  vectors + graph; summary entries    │
+             │  (title+path); cross-cluster edges   │
+             └───┬──────────────┬──────────────┬────┘
+                 │ import-tree  │ import-tree  │ ... (flexible, N trees)
+                 ▼              ▼              ▼
+        ┌──────────────┐ ┌──────────────┐   ┌──────────────┐
+        │ NEUROPIL A   │ │ NEUROPIL B   │   │ NEUROPIL …   │
+        │ file tree    │ │ file tree    │   │ file tree    │
+        │ = memory     │ │ = memory     │   │ = memory     │
+        └──────────────┘ └──────────────┘   └──────────────┘
+                 ▲              ▲              ▲
+                 └────── export-tree / neuropil 化 (摘要入口回写) ──────┘
 ```
 
-- **neuropils** — file-tree content layer. Any directory tree is memory (concepts, papers, knowledge bases); files are the authoritative source, directly readable via grep/cat/tree and Git-versionable. `mnemush import-tree <dir> --project <name>` syncs it into the index incrementally.
-- **mushroom_body** — the DB (SQLite + FTS5 + vectors). Holds agent experience (full text/vectors/graph), summary entries for neuropilized memories, and cross-cluster edges. Retrieval, consolidation, and forgetting happen here.
+- **mushroom_body** — one DB (SQLite + FTS5 + vectors) at the top. It's the single index/association hub: every neuropil's content is indexed here incrementally (`mnemush import-tree <dir> --project <name>`), and cross-cluster edges live here regardless of which neuropil the nodes came from. Retrieval, consolidation, and forgetting happen here.
+- **neuropils** — any number of independent directory trees below it, each a file-system-managed memory source (concepts, papers, knowledge bases, …). Files are the authoritative source, directly readable via grep/cat/tree and Git-versionable. The `…` denotes an arbitrary N — add/remove a neuropil by importing/cleaning its tree without touching the others.
 
 ```
         ┌────────┐  ┌──────────┐  ┌─────────┐
@@ -123,7 +130,7 @@ See [packages/mnemush-dsh/README.md](packages/mnemush-dsh/README.md).
 
 ## Features
 
-- **Two-layer memory** — neuropils (file-tree content) + mushroom_body (index/graph)
+- **One hub, many trees** — a single mushroom_body (index/graph) flexibly indexes any number of file-system neuropils (content)
 - **Semantic recall** — MiniMax embo-01 vectors blended with FTS5 (zero-overlap CN↔EN queries hit)
 - **Graph LTM** — memories interlink, auto-link on add; PageRank/communities
 - **LLM consolidation + active forgetting** — consolidate/dream, dual-threshold + protection (importance≥0.7/never_prune/identity/7d)
